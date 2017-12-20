@@ -1,14 +1,13 @@
 name:          macho-pure
 version:       0.21
 author:        Erik Charlebois
-maintainer:    Erik Charlebois <erikcharlebois@gmail.com>
+maintainer:    Joe Hendrix <jhendrix@galois.com>
 build-type:    Simple
 license:       BSD3
 license-file:  LICENSE
 category:      Data
 cabal-Version: >= 1.6
-synopsis:      Parser for Mach-O object format.
-description:   Parser for Mach-O object format.
+synopsis:      This is an adaption of Erik Charlebois' Mach-O object parser to reduce partial operations.
 
 library
   build-depends:
