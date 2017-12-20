@@ -1,0 +1,24 @@
+name:          macho-pure
+version:       0.21
+author:        Erik Charlebois
+maintainer:    Erik Charlebois <erikcharlebois@gmail.com>
+build-type:    Simple
+license:       BSD3
+license-file:  LICENSE
+category:      Data
+cabal-Version: >= 1.6
+synopsis:      Parser for Mach-O object format.
+description:   Parser for Mach-O object format.
+
+library
+  build-depends:
+       base >= 4 && < 5,
+       bytestring,
+       binary >= 0.6.4.0,
+       bimap,
+       containers
+  hs-source-dirs:  src
+  exposed-modules:
+    Data.MachoPure,
+    Data.MachoPure.Types
+  ghc-options: -Wall
