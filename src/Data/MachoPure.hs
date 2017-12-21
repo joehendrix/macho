@@ -9,7 +9,7 @@ module Data.MachoPure ( parseMacho
                       , MH_FLAGS(..)
                       , VM_PROT(..)
                       , MachoSegment(..)
-                      , SG_FLAG(..)
+                      , SG_FLAGS(..)
                       , MachoSection(..)
                       , S_TYPE(..)
                       , S_USER_ATTR(..)
@@ -37,35 +37,6 @@ import           Numeric
 
 import           Data.MachoPure.Types
 
-getMachHeaderFlags :: Decoder [MH_FLAGS]
-getMachHeaderFlags = getMachHeaderFlags_ 31 <$> getWord32
-  where
-  getMachHeaderFlags_ :: Int -> Word32 -> [MH_FLAGS]
-  getMachHeaderFlags_  0 _ = []
-  getMachHeaderFlags_  1 word | testBit word  0 = MH_NOUNDEFS                : getMachHeaderFlags_  0 word
-  getMachHeaderFlags_  2 word | testBit word  1 = MH_INCRLINK                : getMachHeaderFlags_  1 word
-  getMachHeaderFlags_  3 word | testBit word  2 = MH_DYLDLINK                : getMachHeaderFlags_  2 word
-  getMachHeaderFlags_  4 word | testBit word  3 = MH_BINDATLOAD              : getMachHeaderFlags_  3 word
-  getMachHeaderFlags_  5 word | testBit word  4 = MH_PREBOUND                : getMachHeaderFlags_  4 word
-  getMachHeaderFlags_  6 word | testBit word  5 = MH_SPLIT_SEGS              : getMachHeaderFlags_  5 word
-  getMachHeaderFlags_  7 word | testBit word  6 = MH_LAZY_INIT               : getMachHeaderFlags_  6 word
-  getMachHeaderFlags_  8 word | testBit word  7 = MH_TWOLEVEL                : getMachHeaderFlags_  7 word
-  getMachHeaderFlags_  9 word | testBit word  8 = MH_FORCE_FLAT              : getMachHeaderFlags_  8 word
-  getMachHeaderFlags_ 10 word | testBit word  9 = MH_NOMULTIDEFS             : getMachHeaderFlags_  9 word
-  getMachHeaderFlags_ 11 word | testBit word 10 = MH_NOFIXPREBINDING         : getMachHeaderFlags_ 10 word
-  getMachHeaderFlags_ 12 word | testBit word 11 = MH_PREBINDABLE             : getMachHeaderFlags_ 11 word
-  getMachHeaderFlags_ 13 word | testBit word 12 = MH_ALLMODSBOUND            : getMachHeaderFlags_ 12 word
-  getMachHeaderFlags_ 14 word | testBit word 13 = MH_SUBSECTIONS_VIA_SYMBOLS : getMachHeaderFlags_ 13 word
-  getMachHeaderFlags_ 15 word | testBit word 14 = MH_CANONICAL               : getMachHeaderFlags_ 14 word
-  getMachHeaderFlags_ 16 word | testBit word 15 = MH_WEAK_DEFINES            : getMachHeaderFlags_ 15 word
-  getMachHeaderFlags_ 17 word | testBit word 16 = MH_BINDS_TO_WEAK           : getMachHeaderFlags_ 16 word
-  getMachHeaderFlags_ 18 word | testBit word 17 = MH_ALLOW_STACK_EXECUTION   : getMachHeaderFlags_ 17 word
-  getMachHeaderFlags_ 19 word | testBit word 18 = MH_ROOT_SAFE               : getMachHeaderFlags_ 18 word
-  getMachHeaderFlags_ 20 word | testBit word 19 = MH_SETUID_SAFE             : getMachHeaderFlags_ 19 word
-  getMachHeaderFlags_ 21 word | testBit word 20 = MH_NO_REEXPORTED_DYLIBS    : getMachHeaderFlags_ 20 word
-  getMachHeaderFlags_ 22 word | testBit word 21 = MH_PIE                     : getMachHeaderFlags_ 21 word
-  getMachHeaderFlags_ 23 word | testBit word 21 = MH_DEAD_STRIPPABLE_DYLIB   : getMachHeaderFlags_ 22 word
-  getMachHeaderFlags_  n word = getMachHeaderFlags_ (n-1) word
 
 -- | Number of bytes in a macho header
 headerSize :: Int
@@ -78,15 +49,15 @@ getMachoHeader = do
     case mkMagic magicVal of
       Just magic -> pure magic
       Nothing -> fail $ "Unknown magic: 0x" ++ showHex magicVal "."
-  cputype    <- mach_to_cputype <$> _getWord32 magic
+  Just cputype    <- mach_to_cputype <$> _getWord32 magic
 
   cpusubtype <- mach_to_cpusubtype cputype <$> _getWord32 magic
-  filetype   <- _getWord32 magic
+  filetype   <- MH_FILETYPE <$> _getWord32 magic
 
   _ncmds      <- _getWord32 magic
   sizeofcmds <- _getWord32 magic
 
-  flags      <- runDecoder getMachHeaderFlags magic
+  flags      <- MH_FLAGS <$> _getWord32 magic
 
   -- 64-bit mode has four byte padding.
   when (magicIs64Bit magic) $ do
@@ -95,7 +66,7 @@ getMachoHeader = do
   let hdr = MachoHeader { mh_magic = magic
                         , mh_cputype = cputype
                         , mh_cpusubtype = cpusubtype
-                        , mh_filetype = MH_FILETYPE filetype
+                        , mh_filetype = filetype
                         , mh_flags = flags
                         }
   return (magic, sizeofcmds, hdr)
@@ -199,13 +170,6 @@ getLoadCommands fl mh = do
     rest    <- getLoadCommands fl mh
     return $ lc : rest
 
-getSG_FLAG :: Decoder [SG_FLAG]
-getSG_FLAG = getSG_FLAG_ 31 <$> getWord32
-    where getSG_FLAG_ :: Int -> Word32 -> [SG_FLAG]
-          getSG_FLAG_ 0 _word = []
-          getSG_FLAG_ 1 word | testBit word 0 = SG_HIGHVM  : getSG_FLAG_ 0 word
-          getSG_FLAG_ 3 word | testBit word 2 = SG_NORELOC : getSG_FLAG_ 2 word
-          getSG_FLAG_ n word = getSG_FLAG_ (n-1) word
 
 getRel :: MachoHeader -> Decoder Relocation
 getRel mh = do
@@ -274,7 +238,7 @@ getSegmentCommand fl mh = do
     maxprot  <- VM_PROT <$> getWord32
     initprot <- VM_PROT <$> getWord32
     nsects   <- getWord32
-    flags    <- getSG_FLAG
+    flags    <- SG_FLAGS <$> getWord32
     sects    <- replicateM (fromIntegral nsects) $ getSection fl mh
     return $ MachoSegment { seg_segname = segname
                           , seg_vmaddr  = vmaddr
@@ -353,36 +317,29 @@ getRoutinesCommand con dec = do
   replicateM_ 6 getWord
   return $ con init_address init_module
 
-n_types :: Word8 -> (Bool, Bool, N_TYPE, Bool)
-n_types n = if n .&. 0xe0 == 0 then
-               let npext = n .&. 0x10 /= 0
-                   ntype = n_type ((n .&. 0x0e) `shiftR` 1)
-                   next  = n .&. 0x01 /= 0
-               in (False, npext, ntype, next)
-           else
-               (True, False, n_type n, False)
-
-getSymbolName :: B.ByteString -> Decoder String
+-- | Parse a null-terminated string from an offset in the symbol
+getSymbolName :: B.ByteString -> Decoder B.ByteString
 getSymbolName strsect = do
-    offset <- fromIntegral <$> getWord32
-    return $ C.unpack $ C.takeWhile (/= '\0') $ B.drop offset strsect
+  offset <- getWord32
+  pure $!
+    if offset == 0 then
+      B.empty
+     else
+      B.takeWhile (/= 0) (B.drop (fromIntegral offset) strsect)
 
 getNList :: B.ByteString -> Decoder MachoSymbol
 getNList strsect = do
   n_name  <- getSymbolName strsect
-  typeCode  <- lift getWord8
-  let (stabs, npext, ntype, next) = n_types typeCode
-  n_sect  <- lift getWord8
+  typeCode  <- lift $ SymbolType <$> getWord8
+  n_sect  <- lift $ getWord8
   n_desc  <- getWord16
-  let ref_flags = if stabs then
+  let ref_flags = if typeCode .&. N_STAB /= 0 then
                       Left n_desc
                   else
                       Right $ REFERENCE_FLAG n_desc
   n_value <- getWord
   return $ MachoSymbol { sym_name = n_name
-                       , sym_type = ntype
-                       , sym_pext = npext
-                       , sym_ext = next
+                       , sym_type = typeCode
                        , sym_sect = n_sect
                        , sym_flags = ref_flags
                        , sym_value = n_value
