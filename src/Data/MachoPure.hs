@@ -1,27 +1,9 @@
 -- | Data.Macho is a module for parsing a ByteString of a Mach-O file into a Macho record.
-module Data.MachoPure ( parseMacho
-                      , Macho(..)
-                      , MachoError(..)
-                      , MachoHeader(..)
-                      , LC_COMMAND(..)
-                      , CPU_TYPE(..)
-                      , CPU_SUBTYPE(..)
-                      , MH_FLAGS(..)
-                      , VM_PROT(..)
-                      , MachoSegment(..)
-                      , SG_FLAGS(..)
-                      , MachoSection(..)
-                      , S_TYPE(..)
-                      , S_USER_ATTR(..)
-                      , S_SYS_ATTR(..)
-                      , N_TYPE(..)
-                      , REFERENCE_FLAG(..)
-                      , MachoSymbol(..)
-                      , DylibModule(..)
-                      , R_TYPE(..)
-                      , Relocation(..)
-                      , MachoDynamicSymbolTable(..)
-                      , MH_FILETYPE(..)) where
+module Data.MachoPure
+  ( parseMacho
+  , module Data.MachoPure.Types
+  , MachoError(..)
+  ) where
 
 import           Control.Monad
 import           Data.Binary hiding (decode)
@@ -35,6 +17,7 @@ import qualified Data.Map as Map
 import           Data.Maybe
 import           Numeric
 
+import           Data.MachoPure.Decoder
 import           Data.MachoPure.Types
 
 
@@ -71,32 +54,6 @@ getMachoHeader = do
                         }
   return (magic, sizeofcmds, hdr)
 
-
-data MachoError
-   = HeaderError !ByteOffset !String
-   | CommandError !ByteOffset !String
-
-instance Show MachoError where
-  show (HeaderError pos msg) = "Could not decode header at pos " ++ show pos ++ ": " ++ msg
-  show (CommandError pos msg) = "Could not decode commands at pos " ++ show pos ++ ": " ++ msg
-
-
--- | Parse a ByteString of a Mach-O object into a Macho record.
-parseMacho :: B.ByteString -> Either MachoError Macho
-parseMacho b =
-  case runGetOrFail getMachoHeader (L.fromChunks [b]) of
-    Left (_,pos,msg) ->
-      Left $ HeaderError pos msg
-    Right (_,_,(mr, sizeofcmds, header)) ->
-      case runGetOrFail (runDecoder (getLoadCommands b header) mr)
-                        (L.fromChunks [B.take (fromIntegral sizeofcmds) $ B.drop headerSize b]) of
-        Left (_,pos,msg) -> do
-          Left $ CommandError pos msg
-        Right (_,_,commands) ->
-          Right $ Macho header commands
-
-
-
 getTwoLevelHint :: Decoder (Word32, Word32)
 getTwoLevelHint = do
   word <- getWord32
@@ -109,67 +66,6 @@ getTwoLevelHintsCommand fl = do
   offset  <- getWord32
   nhints  <-  getWord32
   LC_TWOLEVEL_HINTS <$> decode fl offset (replicateM (fromIntegral nhints) getTwoLevelHint)
-
-type CommandGetter =
-       B.ByteString
-       -> B.ByteString
-       -> MachoHeader
-       -> Decoder LC_COMMAND
-
-loadCommandMap :: Map Word32 CommandGetter
-loadCommandMap = Map.fromList
-  [ (,) 0x00000001 $ \_ fl  mh -> LC_SEGMENT <$> getSegmentCommand fl mh
-  , (,) 0x00000002 $ \_ fl  _  -> getSymTabCommand fl
-  , (,) 0x00000004 $ \_  _  _  -> LC_THREAD <$> getThreadCommand
-  , (,) 0x00000005 $ \_  _  _  -> LC_THREAD <$> getThreadCommand
-  , (,) 0x0000000b $ \_  fl mh -> getDySymTabCommand fl mh
-  , (,) 0x0000000c $ \lc _  _  -> getDylibCommand lc LC_LOAD_DYLIB
-  , (,) 0x0000000d $ \lc _  _  -> getDylibCommand lc LC_ID_DYLIB
-  , (,) 0x0000000e $ \lc _  _  -> LC_LOAD_DYLINKER <$> getLC_STR lc
-  , (,) 0x0000000f $ \lc _  _  -> LC_ID_DYLINKER   <$> getLC_STR lc
-  , (,) 0x00000010 $ \lc _  _  -> getPreboundDylibCommand lc
-  , (,) 0x00000011 $ \_  _  _  -> getRoutinesCommand LC_ROUTINES getWord32
-  , (,) 0x00000012 $ \lc _  _  -> LC_SUB_FRAMEWORK <$> getLC_STR lc
-  , (,) 0x00000013 $ \lc _  _  -> LC_SUB_UMBRELLA  <$> getLC_STR lc
-  , (,) 0x00000014 $ \lc _  _  -> LC_SUB_CLIENT    <$> getLC_STR lc
-  , (,) 0x00000015 $ \lc _  _  -> LC_SUB_LIBRARY   <$> getLC_STR lc
-  , (,) 0x00000016 $ \_  fl _  -> getTwoLevelHintsCommand fl
-  , (,) 0x00000017 $ \_  _  _  -> LC_PREBIND_CKSUM <$> getWord32
-  , (,) 0x80000018 $ \lc _  _  -> getDylibCommand lc LC_LOAD_WEAK_DYLIB
-  , (,) 0x00000019 $ \_  fl mh -> LC_SEGMENT_64 <$> getSegmentCommand fl mh
-  , (,) 0x0000001a $ \_  _  _  -> getRoutinesCommand LC_ROUTINES_64 getWord64
-  , (,) 0x0000001b $ \_  _  _  -> lift $ LC_UUID <$> replicateM 8 getWord8
-  , (,) 0x8000001c $ \lc _  _  -> LC_RPATH <$> getLC_STR lc
-  , (,) 0x0000001d $ \_  _  _  -> LC_CODE_SIGNATURE <$> getWord32 <*> getWord32
-  , (,) 0x0000001e $ \_  _  _  -> LC_SEGMENT_SPLIT_INFO <$> getWord32 <*> getWord32
-  ]
-
-getLoadCommand :: Word32
-               -> B.ByteString
-               -> B.ByteString
-               -> MachoHeader
-               -> LC_COMMAND
-getLoadCommand code contents fl mh =
-  case Map.lookup code loadCommandMap of
-    Nothing ->  LC_UNKNOWN code contents
-    Just getter ->
-      case runGetOrFail (runDecoder (getter contents fl mh) (mh_magic mh)) (L.fromChunks [contents]) of
-        Right (_,_,r) -> r
-        Left (_,pos,msg) -> LC_INVALID code contents pos msg
-
-getLoadCommands :: B.ByteString -> MachoHeader -> Decoder [LC_COMMAND]
-getLoadCommands fl mh = do
-  e <- lift isEmpty
-  if e then
-    return []
-   else do
-    cmd     <- getWord32
-    cmdsize <- getWord32
-    lcdata  <- lift $ getByteString (fromIntegral (cmdsize - 8))
-    let lc = getLoadCommand cmd lcdata fl mh
-    rest    <- getLoadCommands fl mh
-    return $ lc : rest
-
 
 getRel :: MachoHeader -> Decoder Relocation
 getRel mh = do
@@ -223,9 +119,8 @@ getSection fl mh = do
                       , sec_size       = size
                       , sec_align      = 2 ^ align
                       , sec_relocs     = relocs
-                      , sec_type       = sectionType flags
-                      , sec_user_attrs = sectionUserAttribute flags
-                      , sec_sys_attrs  = sectionSystemAttribute flags
+                      , sec_type       = S_TYPE (fromIntegral flags :: Word8)
+                      , sec_attrs      = S_ATTR (flags .&. 0xffffff00)
                       }
 
 getSegmentCommand :: B.ByteString -> MachoHeader -> Decoder MachoSegment
@@ -250,28 +145,6 @@ getSegmentCommand fl mh = do
                           , seg_flags    = flags
                           , seg_sections = sects
                           }
-
-
-sectionUserAttribute :: Word32 -> [S_USER_ATTR]
-sectionUserAttribute flags0 = sectionUserAttribute_ 31 (flags0 .&. 0xff000000)
-    where sectionUserAttribute_ :: Int -> Word32 -> [S_USER_ATTR]
-          sectionUserAttribute_  0 _ = []
-          sectionUserAttribute_ 31 flags | testBit flags 30 = S_ATTR_PURE_INSTRUCTIONS   : sectionUserAttribute_ 30 flags
-          sectionUserAttribute_ 30 flags | testBit flags 29 = S_ATTR_NO_TOC              : sectionUserAttribute_ 29 flags
-          sectionUserAttribute_ 29 flags | testBit flags 28 = S_ATTR_STRIP_STATIC_SYMS   : sectionUserAttribute_ 28 flags
-          sectionUserAttribute_ 28 flags | testBit flags 27 = S_ATTR_NO_DEAD_STRIP       : sectionUserAttribute_ 27 flags
-          sectionUserAttribute_ 27 flags | testBit flags 26 = S_ATTR_LIVE_SUPPORT        : sectionUserAttribute_ 26 flags
-          sectionUserAttribute_ 26 flags | testBit flags 25 = S_ATTR_SELF_MODIFYING_CODE : sectionUserAttribute_ 25 flags
-          sectionUserAttribute_  n flags = sectionUserAttribute_ (n-1) flags
-
-sectionSystemAttribute :: Word32 -> [S_SYS_ATTR]
-sectionSystemAttribute flags0 = sectionSystemAttribute_ 31 (flags0 .&. 0x00ffff00)
-    where sectionSystemAttribute_ :: Int -> Word32 -> [S_SYS_ATTR]
-          sectionSystemAttribute_  0 _ = []
-          sectionSystemAttribute_  8 flags | testBit flags 7 = S_ATTR_LOC_RELOC         : sectionSystemAttribute_  7 flags
-          sectionSystemAttribute_  9 flags | testBit flags 8 = S_ATTR_EXT_RELOC         : sectionSystemAttribute_  8 flags
-          sectionSystemAttribute_ 10 flags | testBit flags 9 = S_ATTR_SOME_INSTRUCTIONS : sectionSystemAttribute_  9 flags
-          sectionSystemAttribute_  n flags = sectionSystemAttribute_ (n-1) flags
 
 nullStringAt :: Word32 -> B.ByteString -> B.ByteString
 nullStringAt offset = B.takeWhile ((/=) 0) . B.drop (fromIntegral offset)
@@ -384,17 +257,18 @@ getModule = do
         (,) <$> getWord64 <*> getWord32
       else
         (,) <$> getWord   <*> getWord32
-    return DylibModule
-        { dylib_module_name_offset    = module_name
-        , dylib_ext_def_sym           = (iextdefsym, nextdefsym)
-        , dylib_ref_sym               = (irefsym, nrefsym)
-        , dylib_local_sym             = (ilocalsym, nlocalsym)
-        , dylib_ext_rel               = (iextrel, nextrel)
-        , dylib_init                  = (iinit, ninit)
-        , dylib_term                  = (iterm, nterm)
-        , dylib_objc_module_info_addr = objc_module_info_addr
-        , dylib_objc_module_info_size = objc_module_info_size
-        }
+    return $!
+      DylibModule
+      { dylib_module_name_offset    = module_name
+      , dylib_ext_def_sym           = (iextdefsym, nextdefsym)
+      , dylib_ref_sym               = (irefsym, nrefsym)
+      , dylib_local_sym             = (ilocalsym, nlocalsym)
+      , dylib_ext_rel               = (iextrel, nextrel)
+      , dylib_init                  = (iinit, ninit)
+      , dylib_term                  = (iterm, nterm)
+      , dylib_objc_module_info_addr = objc_module_info_addr
+      , dylib_objc_module_info_size = objc_module_info_size
+      }
 
 getDySymTabCommand :: B.ByteString
                    -> MachoHeader
@@ -435,3 +309,91 @@ getDySymTabCommand fl mh = do
         , extRels      = extrels
         , locRels      = locrels
         }
+
+------------------------------------------------------------------------
+-- Load commands
+
+type CommandGetter =
+       B.ByteString
+       -> B.ByteString
+       -> MachoHeader
+       -> Decoder LC_COMMAND
+
+-- | Map from command type code to the parser for that command.
+loadCommandMap :: Map Word32 CommandGetter
+loadCommandMap = Map.fromList
+  [ (,) 0x00000001 $ \_ fl  mh -> LC_SEGMENT <$> getSegmentCommand fl mh
+  , (,) 0x00000002 $ \_ fl  _  -> getSymTabCommand fl
+  , (,) 0x00000004 $ \_  _  _  -> LC_THREAD <$> getThreadCommand
+  , (,) 0x00000005 $ \_  _  _  -> LC_THREAD <$> getThreadCommand
+  , (,) 0x0000000b $ \_  fl mh -> getDySymTabCommand fl mh
+  , (,) 0x0000000c $ \lc _  _  -> getDylibCommand lc LC_LOAD_DYLIB
+  , (,) 0x0000000d $ \lc _  _  -> getDylibCommand lc LC_ID_DYLIB
+  , (,) 0x0000000e $ \lc _  _  -> LC_LOAD_DYLINKER <$> getLC_STR lc
+  , (,) 0x0000000f $ \lc _  _  -> LC_ID_DYLINKER   <$> getLC_STR lc
+  , (,) 0x00000010 $ \lc _  _  -> getPreboundDylibCommand lc
+  , (,) 0x00000011 $ \_  _  _  -> getRoutinesCommand LC_ROUTINES getWord32
+  , (,) 0x00000012 $ \lc _  _  -> LC_SUB_FRAMEWORK <$> getLC_STR lc
+  , (,) 0x00000013 $ \lc _  _  -> LC_SUB_UMBRELLA  <$> getLC_STR lc
+  , (,) 0x00000014 $ \lc _  _  -> LC_SUB_CLIENT    <$> getLC_STR lc
+  , (,) 0x00000015 $ \lc _  _  -> LC_SUB_LIBRARY   <$> getLC_STR lc
+  , (,) 0x00000016 $ \_  fl _  -> getTwoLevelHintsCommand fl
+  , (,) 0x00000017 $ \_  _  _  -> LC_PREBIND_CKSUM <$> getWord32
+  , (,) 0x80000018 $ \lc _  _  -> getDylibCommand lc LC_LOAD_WEAK_DYLIB
+  , (,) 0x00000019 $ \_  fl mh -> LC_SEGMENT_64 <$> getSegmentCommand fl mh
+  , (,) 0x0000001a $ \_  _  _  -> getRoutinesCommand LC_ROUTINES_64 getWord64
+  , (,) 0x0000001b $ \_  _  _  -> lift $ LC_UUID <$> replicateM 8 getWord8
+  , (,) 0x8000001c $ \lc _  _  -> LC_RPATH <$> getLC_STR lc
+  , (,) 0x0000001d $ \_  _  _  -> LC_CODE_SIGNATURE <$> getWord32 <*> getWord32
+  , (,) 0x0000001e $ \_  _  _  -> LC_SEGMENT_SPLIT_INFO <$> getWord32 <*> getWord32
+  ]
+
+getLoadCommand :: Word32
+               -> B.ByteString
+               -> B.ByteString
+               -> MachoHeader
+               -> LC_COMMAND
+getLoadCommand code contents fl mh =
+  case Map.lookup code loadCommandMap of
+    Nothing ->  LC_UNKNOWN code contents
+    Just getter ->
+      case doDecode (mh_magic mh) (getter contents fl mh) contents of
+        Right (_,_,r) -> r
+        Left (_,pos,msg) -> LC_INVALID code contents pos msg
+
+getLoadCommands :: B.ByteString -> MachoHeader -> Decoder [LC_COMMAND]
+getLoadCommands fl mh = do
+  e <- lift isEmpty
+  if e then
+    return []
+   else do
+    cmd     <- getWord32
+    cmdsize <- getWord32
+    lcdata  <- lift $ getByteString (fromIntegral (cmdsize - 8))
+    let lc = getLoadCommand cmd lcdata fl mh
+    rest    <- getLoadCommands fl mh
+    return $ lc : rest
+
+------------------------------------------------------------------------
+-- parseMacho
+
+data MachoError
+   = HeaderError !ByteOffset !String
+   | CommandError !ByteOffset !String
+
+instance Show MachoError where
+  show (HeaderError pos msg) = "Could not decode header at pos " ++ show pos ++ ": " ++ msg
+  show (CommandError pos msg) = "Could not decode commands at pos " ++ show pos ++ ": " ++ msg
+
+-- | Parse a ByteString of a Mach-O object into a Macho record.
+parseMacho :: B.ByteString -> Either MachoError Macho
+parseMacho b =
+  case runGetOrFail getMachoHeader (L.fromChunks [b]) of
+    Left (_,pos,msg) ->
+      Left $ HeaderError pos msg
+    Right (_,_, (mr, sizeofcmds, header)) ->
+      case doDecode mr (getLoadCommands b header) (B.take (fromIntegral sizeofcmds) $ B.drop headerSize b) of
+        Left (_,pos,msg) -> do
+          Left $ CommandError pos msg
+        Right (_,_,commands) ->
+          Right $ Macho header commands

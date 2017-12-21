@@ -8,11 +8,11 @@ module Data.MachoPure.Types
   , MH_MAGIC
   , mkMagic
   , magicIs64Bit
+  , magicIsLittleEndian
   , pattern MH_MAGIC32
   , pattern MH_MAGIC64
   , pattern MH_CIGAM32
   , pattern MH_CIGAM64
-  , _getWord32
     -- ** CPU type
   , CPU_TYPE(..)
   , mach_to_cputype
@@ -68,7 +68,7 @@ module Data.MachoPure.Types
   , pattern SG_HIGHVM
   , pattern SG_NORELOC
     -- ** Virtual memory protections
-  , VM_PROT(..)
+   , VM_PROT(..)
   , pattern VM_PROT_READ
   , pattern VM_PROT_WRITE
   , pattern VM_PROT_EXECUTE
@@ -78,6 +78,35 @@ module Data.MachoPure.Types
   , getSectionName
     -- ** S_TYPE
   , S_TYPE(..)
+  , pattern S_REGULAR
+  , pattern S_ZEROFILL
+  , pattern S_CSTRING_LITERALS
+  , pattern S_4BYTE_LITERALS
+  , pattern S_8BYTE_LITERALS
+  , pattern S_LITERAL_POINTERS
+  , pattern S_NON_LAZY_SYMBOL_POINTERS
+  , pattern S_LAZY_SYMBOL_POINTERS
+  , pattern S_SYMBOL_STUBS
+  , pattern S_MOD_INIT_FUNC_POINTERS
+  , pattern S_MOD_TERM_FUNC_POINTERS
+  , pattern S_COALESCED
+  , pattern S_GB_ZEROFILL
+  , pattern S_INTERPOSING
+  , pattern S_16BYTE_LITERALS
+  , pattern S_DTRACE_DOF
+  , pattern S_LAZY_DYLIB_SYMBOL_POINTERS
+    -- ** Section attributes
+  , S_ATTR(..)
+  , pattern S_ATTR_PURE_INSTRUCTIONS
+  , pattern S_ATTR_NO_TOC
+  , pattern S_ATTR_STRIP_STATIC_SYMS
+  , pattern S_ATTR_NO_DEAD_STRIP
+  , pattern S_ATTR_LIVE_SUPPORT
+  , pattern S_ATTR_SELF_MODIFYING_CODE
+  , pattern S_ATTR_DEBUG
+  , pattern S_ATTR_SOME_INSTRUCTIONS
+  , pattern S_ATTR_EXT_RELOC
+  , pattern S_ATTR_LOC_RELOC
     -- * Symbols
   , MachoSymbol(..)
     -- ** Symbol type information
@@ -147,37 +176,18 @@ module Data.MachoPure.Types
     -- * Other
   , DylibModule(..)
   , MachoDynamicSymbolTable(..)
-
-  , sectionType
-  , S_SYS_ATTR(..)
-  , S_USER_ATTR(..)
-  -- * Decoder
-  , Decoder
-  , runDecoder
-  , binary
-  , decode
-  , is64bit
-  , getWord
-  , getWord16
-  , getWord32
-  , getWord64
-  , bitfield
-  , lift
   ) where
 
-import           Control.Monad
 import           Data.Bimap (Bimap)
 import qualified Data.Bimap as Bimap
 import           Data.Binary.Get hiding (Decoder)
-import           Data.Binary.Put
 import           Data.Bits
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
-import qualified Data.ByteString.Lazy as L
 import           Data.Int
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Monoid
+import           Data.Monoid
 import           Data.String
 import           Data.Word
 import           Numeric (showHex)
@@ -206,7 +216,6 @@ magicIsLittleEndian (MH_MAGIC v) = (v .&. 0xfeedface) == 0xfeedface
 magicIs64Bit :: MH_MAGIC -> Bool
 magicIs64Bit (MH_MAGIC v) = v .&. 0x01000001 /= 0
 
-
 knownMagic :: Map MH_MAGIC String
 knownMagic = Map.fromList
   [ (,) MH_MAGIC32 "MH_MAGIC32"
@@ -227,81 +236,8 @@ instance Show MH_MAGIC where
       Just nm -> nm
       Nothing -> "0x" ++ showHex (magicValue m) ""
 
-newtype Decoder a = Decoder { runDecoder :: MH_MAGIC -> Get a }
-
-binary :: Decoder MH_MAGIC
-binary = Decoder pure
-
-decode :: B.ByteString -> Word32 -> Decoder a -> Decoder a
-decode bs off ds = do
-  b <- binary
-  case runGetOrFail (runDecoder ds b) (L.fromChunks [B.drop (fromIntegral off) bs]) of
-    Right (_,_,r) ->
-      pure r
-    Left (_,pos,msg) ->
-      fail $ "Error decoding at position " ++ show pos ++ ": " ++ msg
-
-getWord :: Decoder Word64
-getWord = do
-  is64 <- is64bit
-  if is64 then getWord64 else fromIntegral <$> getWord32
-
-lift :: Get a -> Decoder a
-lift g = Decoder (\_ -> g)
-
-instance Functor Decoder where
-  fmap = liftM
-
-instance Applicative Decoder where
-  pure = return
-  (<*>) = ap
-
-instance Monad Decoder where
-  return x = Decoder (\_ -> return x)
-  Decoder f >>= g = Decoder $ \h -> do x <- f h;  runDecoder (g x) h
-  fail msg = Decoder $ \_ -> fail msg
-
-is64bit :: Decoder Bool
-is64bit = Decoder (pure . magicIs64Bit)
-
-getWord16 :: Decoder Word16
-getWord16 = Decoder _getWord16
-
-getWord32 :: Decoder Word32
-getWord32 = Decoder _getWord32
-
-getWord64 :: Decoder Word64
-getWord64 = Decoder _getWord64
-
-bitfield_le :: Int -> Int -> Word32 -> Word32
-bitfield_le off sz word = (word `shiftL` (32 - (off + sz))) `shiftR` (32 - sz)
-
-bitfield_be :: Int -> Int -> Word32 -> Word32
-bitfield_be off sz word = (word `shiftL` off) `shiftR` (32 - sz)
-
-bitfield  :: Int -> Int -> Word32 -> Decoder Word32
-bitfield off sz word = do
-  m <- Decoder pure
-  pure $ if magicIsLittleEndian m then bitfield_le off sz word else bitfield_be off sz word
-
-_getWord16 :: MH_MAGIC -> Get Word16
-_getWord16 m = if magicIsLittleEndian m then getWord16le else getWord16be
-
-_getWord32 :: MH_MAGIC -> Get Word32
-_getWord32 m = if magicIsLittleEndian m then getWord32le else getWord32be
-
-_getWord64 :: MH_MAGIC -> Get Word64
-_getWord64 m = if magicIsLittleEndian m then getWord64le else getWord64be
-
-_putWord16 :: MH_MAGIC -> Word16 -> Put
-_putWord16 m = if magicIsLittleEndian m then putWord16le else putWord16be
-
-_putWord32 :: MH_MAGIC -> Word32 -> Put
-_putWord32 m = if magicIsLittleEndian m then putWord32le else putWord32be
-
-_putWord64 :: MH_MAGIC -> Word64 -> Put
-_putWord64 m = if magicIsLittleEndian m then putWord64le else putWord64be
-
+------------------------------------------------------------------------
+-- CPU_TYPE
 
 data CPU_TYPE
     = CPU_TYPE_X86
@@ -670,61 +606,140 @@ instance Show SectionName where
 ------------------------------------------------------------------------
 -- S_TYPE
 
-data S_TYPE
-    = S_REGULAR                    -- ^ regular section
-    | S_ZEROFILL                   -- ^ zero fill on demand section
-    | S_CSTRING_LITERALS           -- ^ section with only literal C strings
-    | S_4BYTE_LITERALS             -- ^ section with only 4 byte literals
-    | S_8BYTE_LITERALS             -- ^ section with only 8 byte literals
-    | S_LITERAL_POINTERS           -- ^ section with only pointers to literals
-    | S_NON_LAZY_SYMBOL_POINTERS   -- ^ section with only non-lazy symbol pointers
-    | S_LAZY_SYMBOL_POINTERS       -- ^ section with only lazy symbol pointers
-    | S_SYMBOL_STUBS               -- ^ section with only symbol stubs, bte size of stub in the reserved2 field
-    | S_MOD_INIT_FUNC_POINTERS     -- ^ section with only function pointers for initialization
-    | S_MOD_TERM_FUNC_POINTERS     -- ^ section with only function pointers for termination
-    | S_COALESCED                  -- ^ section contains symbols that are to be coalesced
-    | S_GB_ZEROFILL                -- ^ zero fill on demand section (that can be larger than 4 gigabytes)
-    | S_INTERPOSING                -- ^ section with only pairs of function pointers for interposing
-    | S_16BYTE_LITERALS            -- ^ section with only 16 byte literals
-    | S_DTRACE_DOF                 -- ^ section contains DTrace Object Format
-    | S_LAZY_DYLIB_SYMBOL_POINTERS -- ^ section with only lazy symbol pointers to lazy loaded dylibs
-    deriving (Show, Eq)
+newtype S_TYPE = S_TYPE Word8
+  deriving (Eq,Show)
 
-sectionType :: Word32 -> S_TYPE
-sectionType flags =
-  case flags .&. 0x000000ff of
-    0x00 -> S_REGULAR
-    0x01 -> S_ZEROFILL
-    0x02 -> S_CSTRING_LITERALS
-    0x03 -> S_4BYTE_LITERALS
-    0x04 -> S_8BYTE_LITERALS
-    0x05 -> S_LITERAL_POINTERS
-    0x06 -> S_NON_LAZY_SYMBOL_POINTERS
-    0x07 -> S_LAZY_SYMBOL_POINTERS
-    0x08 -> S_SYMBOL_STUBS
-    0x09 -> S_MOD_INIT_FUNC_POINTERS
-    0x0a -> S_MOD_TERM_FUNC_POINTERS
-    0x0b -> S_COALESCED
-    0x0c -> S_GB_ZEROFILL
-    0x0d -> S_INTERPOSING
-    0x0e -> S_16BYTE_LITERALS
-    0x0f -> S_DTRACE_DOF
-    0x10 -> S_LAZY_DYLIB_SYMBOL_POINTERS
+pattern S_REGULAR :: S_TYPE
+pattern S_REGULAR = S_TYPE 0x00
+-- ^ regular section
+
+pattern S_ZEROFILL :: S_TYPE
+pattern S_ZEROFILL = S_TYPE 0x01
+-- ^ zero fill on demand section
+
+pattern S_CSTRING_LITERALS :: S_TYPE
+pattern S_CSTRING_LITERALS = S_TYPE 0x02
+-- ^ section with only literal C strings
+
+pattern S_4BYTE_LITERALS :: S_TYPE
+pattern S_4BYTE_LITERALS = S_TYPE 0x03
+-- ^ section with only 4 byte literals
+
+pattern S_8BYTE_LITERALS :: S_TYPE
+pattern S_8BYTE_LITERALS = S_TYPE 0x04
+-- ^ section with only 8 byte literals
+
+pattern S_LITERAL_POINTERS :: S_TYPE
+pattern S_LITERAL_POINTERS = S_TYPE 0x05
+-- ^ section with only pointers to literals
+
+pattern S_NON_LAZY_SYMBOL_POINTERS :: S_TYPE
+pattern S_NON_LAZY_SYMBOL_POINTERS = S_TYPE 0x06
+-- ^ section with only non-lazy symbol pointers
+
+pattern S_LAZY_SYMBOL_POINTERS :: S_TYPE
+pattern S_LAZY_SYMBOL_POINTERS = S_TYPE 0x07
+-- ^ section with only lazy symbol pointers
+
+pattern S_SYMBOL_STUBS :: S_TYPE
+pattern S_SYMBOL_STUBS = S_TYPE 0x08
+-- ^ section with only symbol stubs, bte size of stub in the reserved2 field
+
+pattern S_MOD_INIT_FUNC_POINTERS :: S_TYPE
+pattern S_MOD_INIT_FUNC_POINTERS = S_TYPE 0x09
+-- ^ section with only function pointers for initialization
+
+pattern S_MOD_TERM_FUNC_POINTERS :: S_TYPE
+pattern S_MOD_TERM_FUNC_POINTERS = S_TYPE 0x0a
+-- ^ section with only function pointers for termination
+
+pattern S_COALESCED :: S_TYPE
+pattern S_COALESCED = S_TYPE 0x0b
+-- ^ section contains symbols that are to be coalesced
+
+pattern S_GB_ZEROFILL :: S_TYPE
+pattern S_GB_ZEROFILL = S_TYPE 0x0c
+-- ^ zero fill on demand section (that can be larger than 4 gigabytes)
+
+pattern S_INTERPOSING :: S_TYPE
+pattern S_INTERPOSING = S_TYPE 0x0d
+-- ^ section with only pairs of function pointers for interposing
+
+pattern S_16BYTE_LITERALS :: S_TYPE
+pattern S_16BYTE_LITERALS = S_TYPE 0x0e
+-- ^ section with only 16 byte literals
+
+pattern S_DTRACE_DOF :: S_TYPE
+pattern S_DTRACE_DOF = S_TYPE 0x0f
+-- ^ section contains DTrace Object Format
+
+pattern S_LAZY_DYLIB_SYMBOL_POINTERS :: S_TYPE
+pattern S_LAZY_DYLIB_SYMBOL_POINTERS = S_TYPE 0x10
+-- ^ section with only lazy symbol pointers to lazy loaded dylibs
+
+------------------------------------------------------------------------
+-- S_ATTR
+
+newtype S_ATTR = S_ATTR Word32
+  deriving (Eq, Bits, Num)
+
+instance Show S_ATTR where
+  show (S_ATTR x) = "0x" ++ showHex x ""
+
+pattern S_ATTR_PURE_INSTRUCTIONS :: S_ATTR
+pattern S_ATTR_PURE_INSTRUCTIONS = S_ATTR 0x80000000
+-- ^ section contains only true machine instructions
+
+pattern S_ATTR_NO_TOC :: S_ATTR
+pattern S_ATTR_NO_TOC = S_ATTR 0x40000000
+-- ^ setion contains coalesced symbols that are not to be in a ranlib table of contents
+
+pattern S_ATTR_STRIP_STATIC_SYMS :: S_ATTR
+pattern S_ATTR_STRIP_STATIC_SYMS = S_ATTR 0x20000000
+-- ^ ok to strip static symbols in this section in files with the MH_DYLDLINK flag
+
+pattern S_ATTR_NO_DEAD_STRIP :: S_ATTR
+pattern S_ATTR_NO_DEAD_STRIP = S_ATTR 0x10000000
+-- ^ no dead stripping
+
+pattern S_ATTR_LIVE_SUPPORT :: S_ATTR
+pattern S_ATTR_LIVE_SUPPORT = S_ATTR  0x08000000
+-- ^ blocks are live if they reference live blocks
+
+pattern S_ATTR_SELF_MODIFYING_CODE :: S_ATTR
+pattern S_ATTR_SELF_MODIFYING_CODE = S_ATTR 0x04000000
+-- ^ used with i386 code stubs written on by dyld
+
+pattern S_ATTR_DEBUG :: S_ATTR
+pattern S_ATTR_DEBUG = S_ATTR 0x02000000
+-- ^ a debug section
+
+pattern S_ATTR_SOME_INSTRUCTIONS :: S_ATTR
+pattern S_ATTR_SOME_INSTRUCTIONS = S_ATTR 0x00000400
+-- ^ section contains soem machine instructions
+
+pattern S_ATTR_EXT_RELOC :: S_ATTR
+pattern S_ATTR_EXT_RELOC = S_ATTR 0x00000200
+-- ^ section has external relocation entries
+
+pattern S_ATTR_LOC_RELOC :: S_ATTR
+pattern S_ATTR_LOC_RELOC = S_ATTR 0x00000100
+-- ^ section has local relocation entries
 
 ------------------------------------------------------------------------
 -- MachoSection
 
 data MachoSection = MachoSection
-    { sec_sectname    :: !SectionName
+    { sec_sectname :: !SectionName
       -- ^ name of section
-    , sec_segname     :: !SegmentName        -- ^ name of segment that should own this section
-    , sec_addr        :: Word64        -- ^ virtual memoy address for section
-    , sec_size        :: Word64        -- ^ size of section
-    , sec_align       :: Int           -- ^ alignment required by section (literal form, not power of two, e.g. 8 not 3)
-    , sec_relocs      :: [Relocation]  -- ^ relocations for this section
-    , sec_type        :: S_TYPE        -- ^ type of section
-    , sec_user_attrs  :: [S_USER_ATTR] -- ^ user attributes of section
-    , sec_sys_attrs   :: [S_SYS_ATTR]  -- ^ system attibutes of section
+    , sec_segname  :: !SegmentName        -- ^ name of segment that should own this section
+    , sec_addr     :: !Word64        -- ^ virtual memoy address for section
+    , sec_size     :: !Word64        -- ^ size of section
+    , sec_align    :: !Int
+      -- ^ alignment required by section (literal form, not power of two, e.g. 8 not 3)
+    , sec_relocs   :: ![Relocation]  -- ^ relocations for this section
+    , sec_type     :: !S_TYPE        -- ^ type of section
+    , sec_attrs    :: !S_ATTR        -- ^ attributes of section
     } deriving (Show, Eq)
 
 ------------------------------------------------------------------------
@@ -877,25 +892,6 @@ data Macho = Macho
     { m_header   :: MachoHeader  -- ^ Header information.
     , m_commands :: [LC_COMMAND] -- ^ List of load commands describing Mach-O contents.
     } deriving (Show, Eq)
-
-------------------------------------------------------------------------
--- Other
-
-data S_USER_ATTR
-    = S_ATTR_PURE_INSTRUCTIONS   -- ^ section contains only true machine instructions
-    | S_ATTR_NO_TOC              -- ^ setion contains coalesced symbols that are not to be in a ranlib table of contents
-    | S_ATTR_STRIP_STATIC_SYMS   -- ^ ok to strip static symbols in this section in files with the MH_DYLDLINK flag
-    | S_ATTR_NO_DEAD_STRIP       -- ^ no dead stripping
-    | S_ATTR_LIVE_SUPPORT        -- ^ blocks are live if they reference live blocks
-    | S_ATTR_SELF_MODIFYING_CODE -- ^ used with i386 code stubs written on by dyld
-    | S_ATTR_DEBUG               -- ^ a debug section
-    deriving (Show, Eq)
-
-data S_SYS_ATTR
-    = S_ATTR_SOME_INSTRUCTIONS -- ^ section contains soem machine instructions
-    | S_ATTR_EXT_RELOC         -- ^ section has external relocation entries
-    | S_ATTR_LOC_RELOC         -- ^ section has local relocation entries
-    deriving (Show, Eq)
 
 ------------------------------------------------------------------------
 -- N_TYPE
@@ -1117,7 +1113,6 @@ data MachoSymbol = MachoSymbol
     , sym_flags :: Either Word16 REFERENCE_FLAG -- ^ for stab entries, Left Word16 is the uninterpreted flags field, otherwise Right REFERENCE_FLAG describes the symbol flags.
     , sym_value :: Word64                         -- ^ symbol value, 32-bit symbol values are promoted to 64-bit for simpliciy
     } deriving (Show, Eq)
-
 
 ------------------------------------------------------------------------
 -- Other

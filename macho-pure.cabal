@@ -15,9 +15,11 @@ library
        bytestring,
        binary >= 0.6.4.0,
        bimap,
-       containers
+       containers,
+       mtl
   hs-source-dirs:  src
   exposed-modules:
-    Data.MachoPure,
+    Data.MachoPure
+    Data.MachoPure.Decoder
     Data.MachoPure.Types
   ghc-options: -Wall
