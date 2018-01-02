@@ -16,10 +16,14 @@ library
        binary >= 0.6.4.0,
        bimap,
        containers,
-       mtl
+       mtl,
+       utf8-string
   hs-source-dirs:  src
   exposed-modules:
     Data.MachoPure
+    Data.MachoPure.Commands
     Data.MachoPure.Decoder
-    Data.MachoPure.Types
+    Data.MachoPure.Header
+    Data.MachoPure.Relocations
+    Data.MachoPure.Symbols
   ghc-options: -Wall

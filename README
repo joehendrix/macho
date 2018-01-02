@@ -1,0 +1,3 @@
+This is a fork of the Haskell macho package to add support for missing
+features, and make the parser total -- it should no longer throw
+exceptions when encountering Mach-O files it cannot parse.
