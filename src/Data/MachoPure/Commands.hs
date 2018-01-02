@@ -24,6 +24,7 @@ module Data.MachoPure.Commands
   , DyldInfoCommand(..)
   , VersionMinCommand(..)
   , EntryPointCommand(..)
+  , SourceVersionCommand(..)
     -- * Segments
   , MachoSegment(..)
   , Addr(..)
@@ -119,6 +120,30 @@ showPadHex :: (Integral a, Show a) => Int -> a -> String
 showPadHex c a = "0x" ++ replicate (c - length s) '0' ++ s
   where s = showHex a ""
 
+newtype Attrs = Attrs [(String, String)]
+
+instance Monoid Attrs where
+  mempty = Attrs []
+  mappend (Attrs x) (Attrs y) = Attrs (x ++ y)
+
+instance Show Attrs where
+  show = ppAttrs
+
+mkAttr :: String -> String -> String
+mkAttr nm v = nm ++  " " ++ v ++ "\n"
+
+-- | Print a list of name value pairs with one on each line.
+ppAttrs :: Attrs -> String
+ppAttrs (Attrs []) = ""
+ppAttrs (Attrs l) =
+  let lenList = (length . fst <$> l)
+      n = 1 + maximum lenList
+      pp i (nm,v) = replicate (n - i) ' ' ++ nm ++ " " ++ v ++ "\n"
+   in concat (zipWith pp lenList l)
+
+class PPFields tp where
+  ppFields :: String -> tp -> String
+
 ------------------------------------------------------------------------
 -- Addr
 
@@ -127,6 +152,19 @@ newtype Addr = Addr Word64
 
 instance Show Addr where
   show (Addr a) = showPadHex 16 a
+
+------------------------------------------------------------------------
+-- FileOffset
+
+newtype FileOffset = FileOffset { fileOffsetValue :: Word32 }
+  deriving (Eq)
+
+instance Show FileOffset where
+  show = show . fileOffsetValue
+
+instance CommandType FileOffset where
+  getValue _ = FileOffset <$> getWord32
+
 
 ------------------------------------------------------------------------
 -- CommandType
@@ -355,22 +393,19 @@ data MachoSection w = MachoSection
 secType :: MachoSection w -> SectionType
 secType = secAttrType . secFlags
 
-ppAttr :: String -> String -> String
-ppAttr nm v = nm ++ " " ++ v ++ "\n"
-
-ppSection :: Show  w => MachoSection w -> String
-ppSection s
+ppSection :: (Integral w, Show w) => Int -> MachoSection w -> String
+ppSection w s
   = "Section\n"
-  ++ ppAttr "  sectname" (show (secSectname s))
-  ++ ppAttr "   segname" (show (secSegname s))
-  ++ ppAttr "      addr" (show (secAddr s))
-  ++ ppAttr "      size" (show (secSize s))
-  ++ ppAttr "    offset" (show (secAlign s))
-  ++ ppAttr "    reloff" (show (secReloff s))
-  ++ ppAttr "    nreloc" (show (secNReloc s))
-  ++ ppAttr "     flags" (show (secFlags s))
-  ++ ppAttr " reserved1" (show (secReserved1 s))
-  ++ ppAttr " reserved2" (show (secReserved2 s))
+  <> mkAttr "  sectname" (show (secSectname s))
+  <> mkAttr "   segname" (show (secSegname s))
+  <> mkAttr "      addr" (showPadHex w (secAddr s))
+  <> mkAttr "      size" (showPadHex w (secSize s))
+  <> mkAttr "    offset" (show (secAlign s))
+  <> mkAttr "    reloff" (show (secReloff s))
+  <> mkAttr "    nreloc" (show (secNReloc s))
+  <> mkAttr "     flags" (show (secFlags s))
+  <> mkAttr " reserved1" (show (secReserved1 s))
+  <> mkAttr " reserved2" (show (secReserved2 s))
 
 instance CommandType w => CommandType (MachoSection w) where
   getValue lc = do
@@ -497,15 +532,6 @@ data DylibModule = DylibModule
     } deriving (Show, Eq)
 
 ------------------------------------------------------------------------
--- FileOffset
-
-newtype FileOffset = FileOffset { fileOffsetValue :: Word32 }
-  deriving (Eq, Show)
-
-instance CommandType FileOffset where
-  getValue _ = FileOffset <$> getWord32
-
-------------------------------------------------------------------------
 -- SymTabCommand
 
 -- | Information from a symbol table command
@@ -518,6 +544,14 @@ data SymTabCommand = SymTabCommand { symTabOffset :: !FileOffset
 
 instance CommandType SymTabCommand where
   getValue = getRecord SymTabCommand
+
+instance PPFields SymTabCommand where
+  ppFields cmd x
+    =  mkAttr "     cmd" cmd
+    <> mkAttr "  symoff" (show (symTabOffset x))
+    <> mkAttr "   nsyms" (show (symTabSymCount x))
+    <> mkAttr "  stroff" (show (symTabStrOffset x))
+    <> mkAttr " strsize" (show (symTabStrSize x))
 
 ------------------------------------------------------------------------
 -- SymSegCommand
@@ -536,7 +570,7 @@ instance CommandType SymSegCommand where
 -- LCStr
 
 -- | Represents a lcstring excluding the terminating string
-newtype LCStr = LCStr B.ByteString
+newtype LCStr = LCStr { lcStrData :: B.ByteString }
   deriving (Eq)
 
 instance Show LCStr where
@@ -545,6 +579,12 @@ instance Show LCStr where
 -- | Read a load command string given the bytes for the command.
 instance CommandType LCStr where
   getValue lc = LCStr . (`nullStringAt` lc) <$> getWord32
+
+instance PPFields LCStr where
+  ppFields cmd x
+    =  mkAttr "          cmd" cmd
+    <> mkAttr "         name" (C.unpack (lcStrData x))
+
 
 ------------------------------------------------------------------------
 -- ThreadCommand
@@ -610,7 +650,6 @@ data DysymtabCommand = DysymtabCommand
     , dysymtabNExtdefSym :: !Word32 -- ^ Number of externally defined symbols
     , dysymtabIUndefSym  :: !Word32 -- ^ Index to undefined symbols
     , dysymtabNUndefSym  :: !Word32 -- ^ Number of undefined symbols
-
     , dysymtabTocOff         :: !FileOffset        -- ^ Offset for symbol table of contents
     , dysymtabTocCount       :: !Word32            -- ^ Number of symbols in contents.
     , dysymtabModtabOff      :: !FileOffset        -- ^ Offset for modules
@@ -627,6 +666,28 @@ data DysymtabCommand = DysymtabCommand
 
 instance CommandType DysymtabCommand where
   getValue = getRecord DysymtabCommand
+
+instance PPFields DysymtabCommand where
+  ppFields cmd d
+    =  mkAttr "            cmd" cmd
+    <> mkAttr "      ilocalsym" (show (dysymtabILocalSym d))
+    <> mkAttr "      nlocalsym" (show (dysymtabNLocalSym d))
+    <> mkAttr "     iextdefsym" (show (dysymtabIExtdefSym d))
+    <> mkAttr "     nextdefsym" (show (dysymtabNExtdefSym d))
+    <> mkAttr "      iundefsym" (show (dysymtabIUndefSym d))
+    <> mkAttr "      nundefsym" (show (dysymtabNUndefSym d))
+    <> mkAttr "         tocoff" (show (dysymtabTocOff d))
+    <> mkAttr "           ntoc" (show (dysymtabTocCount d))
+    <> mkAttr "      modtaboff" (show (dysymtabModtabOff d))
+    <> mkAttr "        nmodtab" (show (dysymtabModtabCount d))
+    <> mkAttr "   extrefsymoff" (show (dysymtabExtrefSymOff d))
+    <> mkAttr "    nextrefsyms" (show (dysymtabExtrefSymCount d))
+    <> mkAttr " indirectsymoff" (show (dysymtabIndirectSymOff d))
+    <> mkAttr "  nindirectsyms" (show (dysymtabIndirectSymCount d))
+    <> mkAttr "      extreloff" (show (dysymtabExtRelOff d))
+    <> mkAttr "        nextrel" (show (dysymtabExtRelCount d))
+    <> mkAttr "      locreloff" (show (dysymtabLocalRelOff d))
+    <> mkAttr "        nlocrel" (show (dysymtabLocalRelCount d))
 
 ------------------------------------------------------------------------
 -- DylibCommand
@@ -681,7 +742,6 @@ instance CommandType PreboundDylibCommand where
 ------------------------------------------------------------------------
 -- RoutinesCommand
 
--- | A 128-bit bytestring with a UUID for the image.
 data RoutinesCommand w
   = RoutinesCommand
   { routinesInitAddress :: !w
@@ -721,10 +781,15 @@ instance Show UUID where
           hex :: Word8 -> ShowS
           hex w s
             | w < 10    = toEnum (fromEnum '0' + fromIntegral w) : s
-            | otherwise = toEnum (fromEnum 'A' + fromIntegral w) : s
+            | otherwise = toEnum (fromEnum 'A' + fromIntegral (w-10)) : s
 
 instance CommandType UUID where
   getValue _ = lift $ UUID <$> getByteString 16
+
+instance PPFields UUID where
+  ppFields cmd x
+    =  mkAttr "     cmd" cmd
+    <> mkAttr "    uuid" (show x)
 
 ------------------------------------------------------------------------
 -- EncryptionInfoCommand
@@ -770,15 +835,69 @@ data DyldInfoCommand
 instance CommandType DyldInfoCommand where
   getValue = getRecord DyldInfoCommand
 
+instance PPFields DyldInfoCommand where
+  ppFields cmd d
+    =  mkAttr "            cmd" cmd
+    <> mkAttr "     rebase_off" (show (rebaseOff d))
+    <> mkAttr "    rebase_size" (show (rebaseSize d))
+    <> mkAttr "       bind_off" (show (bindOff d))
+    <> mkAttr "      bind_size" (show (bindSize d))
+    <> mkAttr "  weak_bind_off" (show (weakBindOff d))
+    <> mkAttr " weak_bind_size" (show (weakBindSize d))
+    <> mkAttr "  lazy_bind_off" (show (lazyBindOff d))
+    <> mkAttr " lazy_bind_size" (show (lazyBindSize d))
+    <> mkAttr "     export_off" (show (exportOff d))
+    <> mkAttr "    export_size" (show (exportSize d))
+
 ------------------------------------------------------------------------
 -- Version
 
 newtype Version = Version Word32
-  deriving (Eq,Show)
+  deriving (Eq)
 
 instance CommandType Version where
   getValue _ = Version <$> getWord32
 
+instance Show Version where
+  show (Version w)
+      | v2 /= 0   = show v0 ++ "." ++ show v1 ++ "." ++ show v2
+      | v1 /= 0   = show v0 ++ "." ++ show v1
+      | otherwise = show v0
+    where v0 = w `shiftR` 16
+          v1 = (w `shiftR` 8) .&. 0xff
+          v2 = w .&. 0xff
+
+------------------------------------------------------------------------
+-- SourceVersion
+
+newtype SourceVersionCommand = SourceVersionCommand { sourceVersionValue :: Word64 }
+  deriving (Eq)
+
+instance CommandType SourceVersionCommand where
+  getValue _ = SourceVersionCommand <$> getWord64
+
+instance Show SourceVersionCommand where
+  show (SourceVersionCommand x)
+      | e /= 0  = ae
+      | d /= 0  = ad
+      | c /= 0  = ac
+      | otherwise = ab
+    where a = x `shiftR` 40
+          b = (x `shiftR` 30) .&. 0x3ff
+          c = (x `shiftR` 20) .&. 0x3ff
+          d = (x `shiftR` 10) .&. 0x3ff
+          e = x  .&. 0x3ff
+          app s v = s ++ "." ++ show v
+
+          ab = app (show a) b
+          ac = app ab c
+          ad = app ac d
+          ae = app ad e
+
+instance PPFields SourceVersionCommand where
+  ppFields cmd x
+    =  mkAttr "      cmd" cmd
+    <> mkAttr "  version" (show x)
 
 ------------------------------------------------------------------------
 -- VersionMinCommand
@@ -1006,7 +1125,7 @@ data LC_COMMAND
     | LC_DYLD_ENVIRONMENT !LCStr
     | LC_MAIN !EntryPointCommand
     | LC_DATA_IN_CODE !LinkeditDataCommand
-    | LC_SOURCE_VERSION !Version
+    | LC_SOURCE_VERSION !SourceVersionCommand
     | LC_DYLIB_CODE_SIGN_DRS !LinkeditDataCommand
     | LC_ENCRYPTION_INFO_64 !EncryptionInfoCommand
       -- ^ Encryption info
@@ -1033,18 +1152,37 @@ data LC_COMMAND
       -- The fields contain the command type code and the contents of the buffer.
     deriving (Show, Eq)
 
+ppSegment :: (Integral w, Show w) => String -> Int -> MachoSegment w -> String
+ppSegment cmd w s
+  =  mkAttr "      cmd" cmd
+  <> mkAttr "  segname" (show (seg_segname s))
+  <> mkAttr "   vmaddr" (showPadHex w (seg_vmaddr s))
+  <> mkAttr "   vmsize" (showPadHex w (seg_vmsize s))
+  <> mkAttr "  fileoff" (show (seg_fileoff s))
+  <> mkAttr " filesize" (show (seg_filesize s))
+  <> mkAttr "  maxprot" (show (seg_maxprot s))
+  <> mkAttr " initprot" (show (seg_initprot s))
+  <> mkAttr "   nsects" (show (length (seg_sections s)))
+  <> mkAttr "    flags" (show (seg_flags s))
+  <> mconcat (ppSection w <$> seg_sections s)
+
 -- | Pretty print load commands in a style similiar to otool.
 ppLoadCommand :: LC_COMMAND -> String
-ppLoadCommand (LC_SEGMENT_64 s)
-  =  ppAttr "      cmd" "LC_SEGMENT_64"
-  ++ ppAttr "  segname" (show (seg_segname s))
-  ++ ppAttr "   vmaddr" (show (seg_vmaddr s))
-  ++ ppAttr "   vmsize" (show (seg_vmsize s))
-  ++ ppAttr "  fileoff" (show (seg_fileoff s))
-  ++ ppAttr " filesize" (show (seg_filesize s))
-  ++ ppAttr "  maxprot" (show (seg_maxprot s))
-  ++ ppAttr " initprot" (show (seg_initprot s))
-  ++ ppAttr "   nsects" (show (length (seg_sections s)))
-  ++ ppAttr "    flags" (show (seg_flags s))
-  ++ concat (ppSection <$> seg_sections s)
-ppLoadCommand c = show c ++ "\n"
+ppLoadCommand (LC_SEGMENT s)        = ppSegment "LC_SEGMENT" 8 s
+ppLoadCommand (LC_SYMTAB x)         = ppFields "LC_SYMTAB" x
+
+ppLoadCommand (LC_DYSYMTAB s)       = ppFields "LC_DYSYMTAB" s
+
+ppLoadCommand (LC_LOAD_DYLINKER x)  = ppFields "LC_LOAD_DYLINKER" x
+ppLoadCommand (LC_ID_DYLINKER x)    = ppFields "LC_ID_DYLINKER" x
+
+ppLoadCommand (LC_SEGMENT_64 s)     = ppSegment "LC_SEGMENT_64" 16 s
+
+ppLoadCommand (LC_UUID x)           = ppFields "LC_UUID" x
+
+ppLoadCommand (LC_DYLD_INFO d)      = ppFields "LC_DYLD_INFO" d
+ppLoadCommand (LC_DYLD_INFO_ONLY d) = ppFields "LC_DYLD_INFO_ONLY" d
+
+ppLoadCommand (LC_SOURCE_VERSION x) = ppFields "LC_SOURCE_VERSION" x
+
+ppLoadCommand c = mkAttr "UNKNOWN" (show c)

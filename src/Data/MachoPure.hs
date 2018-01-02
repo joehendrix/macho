@@ -312,15 +312,19 @@ loadCommandMap = Map.fromList
 getLoadCommand :: Decoder LC_COMMAND
 getLoadCommand = do
   magic <- binary
-  code <- getWord32
-  cmdsize <- getWord32
-  contents <- lift $ getByteString (fromIntegral (cmdsize - 8))
+  -- Peek to find code and cmd
+  (code,cmdsize) <- lift $
+    lookAhead $ (,) <$> (_getWord32 magic) <*> (_getWord32 magic)
+  when (cmdsize < 8) $ do
+    fail "Invalid command size"
+  -- Get full contents
+  contents <- lift $ getByteString (fromIntegral cmdsize)
   pure $!
     case Map.lookup code loadCommandMap of
       Nothing ->
         LC_UNKNOWN code contents
       Just getter -> do
-        case doDecode magic contents (getter contents) of
+        case doDecode magic (B.drop 8 contents) (getter contents) of
           Right (_,_,r) -> r
           Left (_,pos,msg) -> LC_INVALID code contents pos msg
 
