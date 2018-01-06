@@ -17,7 +17,9 @@ library
        bimap,
        containers,
        mtl,
-       utf8-string
+       time,
+       utf8-string,
+       vector
   hs-source-dirs:  src
   exposed-modules:
     Data.MachoPure

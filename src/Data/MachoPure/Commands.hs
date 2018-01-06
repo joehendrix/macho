@@ -106,19 +106,23 @@ import           Control.Monad
 import           Data.Binary.Get hiding (Decoder)
 import           Data.Bits
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Char8 as C
+import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.UTF8 as UTF8
 import           Data.Monoid
 import           Data.String
+import           Data.Time.Format ()
+import           Data.Time.Clock.POSIX
+import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
 
-import Data.MachoPure.Decoder
+import           Data.MachoPure.Decoder
 
-showPadHex :: (Integral a, Show a) => Int -> a -> String
-showPadHex c a = "0x" ++ replicate (c - length s) '0' ++ s
-  where s = showHex a ""
+showPadHex :: (FiniteBits a, Integral a, Show a) => a -> String
+showPadHex a = "0x" ++ replicate (c - length s) '0' ++ s
+  where c = finiteBitSize a
+        s = showHex a ""
 
 newtype Attrs = Attrs [(String, String)]
 
@@ -151,7 +155,7 @@ newtype Addr = Addr Word64
   deriving (Eq)
 
 instance Show Addr where
-  show (Addr a) = showPadHex 16 a
+  show (Addr a) = showPadHex a
 
 ------------------------------------------------------------------------
 -- FileOffset
@@ -319,7 +323,7 @@ secAttrType :: S_ATTR -> SectionType
 secAttrType = SectionType . fromIntegral . secAttrValue
 
 instance Show S_ATTR where
-  show (S_ATTR x) = showPadHex 8 x
+  show (S_ATTR x) = showPadHex x
 
 pattern S_ATTR_PURE_INSTRUCTIONS :: S_ATTR
 pattern S_ATTR_PURE_INSTRUCTIONS = S_ATTR 0x80000000
@@ -393,13 +397,13 @@ data MachoSection w = MachoSection
 secType :: MachoSection w -> SectionType
 secType = secAttrType . secFlags
 
-ppSection :: (Integral w, Show w) => Int -> MachoSection w -> String
-ppSection w s
+ppSection :: (FiniteBits w, Integral w, Show w) => MachoSection w -> String
+ppSection s
   = "Section\n"
   <> mkAttr "  sectname" (show (secSectname s))
   <> mkAttr "   segname" (show (secSegname s))
-  <> mkAttr "      addr" (showPadHex w (secAddr s))
-  <> mkAttr "      size" (showPadHex w (secSize s))
+  <> mkAttr "      addr" (showPadHex (secAddr s))
+  <> mkAttr "      size" (showPadHex (secSize s))
   <> mkAttr "    offset" (show (secAlign s))
   <> mkAttr "    reloff" (show (secReloff s))
   <> mkAttr "    nreloc" (show (secNReloc s))
@@ -441,7 +445,7 @@ newtype VM_PROT = VM_PROT { vmProtValue :: Word32 }
   deriving (Eq, Bits)
 
 instance Show VM_PROT where
-  show (VM_PROT v) = showPadHex 8 v
+  show (VM_PROT v) = showPadHex v
 
 pattern VM_PROT_READ :: VM_PROT
 pattern VM_PROT_READ = VM_PROT 0x1
@@ -580,12 +584,6 @@ instance Show LCStr where
 instance CommandType LCStr where
   getValue lc = LCStr . (`nullStringAt` lc) <$> getWord32
 
-instance PPFields LCStr where
-  ppFields cmd x
-    =  mkAttr "          cmd" cmd
-    <> mkAttr "         name" (C.unpack (lcStrData x))
-
-
 ------------------------------------------------------------------------
 -- ThreadCommand
 
@@ -689,11 +687,25 @@ instance PPFields DysymtabCommand where
     <> mkAttr "      locreloff" (show (dysymtabLocalRelOff d))
     <> mkAttr "        nlocrel" (show (dysymtabLocalRelCount d))
 
+
+------------------------------------------------------------------------
+-- Timestamp
+
+newtype Timestamp = Timestamp Word32
+  deriving (Eq)
+
+-- Print using UTC time
+instance Show Timestamp where
+  show (Timestamp x) = show (posixSecondsToUTCTime (fromIntegral x))
+
+instance CommandType Timestamp where
+  getValue _ = Timestamp <$> getWord32
+
 ------------------------------------------------------------------------
 -- DylibCommand
 
 data DylibCommand = DylibCommand { symlibNameOffset :: !LCStr
-                                 , symlibTimestamp :: !Word32
+                                 , symlibTimestamp :: !Timestamp
                                  , symlibCurrentVersion :: !Word32
                                  , symlibCompatibilityVersion :: !Word32
                                  }
@@ -746,6 +758,8 @@ data RoutinesCommand w
   = RoutinesCommand
   { routinesInitAddress :: !w
   , routinesInitModule  :: !w
+  , routinesReserved    :: !(V.Vector w)
+    -- ^ A list of 6 reserved words
   }
   deriving (Eq, Show)
 
@@ -753,10 +767,20 @@ instance CommandType w => CommandType (RoutinesCommand w) where
   getValue lc = do
     init_address <- getValue lc
     init_module  <- getValue lc
-    replicateM_ 6 (getValue lc :: Decoder w)
+    res <- V.replicateM 6 (getValue lc)
     pure $ RoutinesCommand { routinesInitAddress = init_address
                            , routinesInitModule  = init_module
+                           , routinesReserved    = res
                            }
+
+instance (FiniteBits w, Integral w, Show w) => PPFields (RoutinesCommand w) where
+  ppFields cmd x
+    =  mkAttr      "          cmd" cmd
+    <> mkAttr      " init_address" (showPadHex (routinesInitAddress x))
+    <> mkAttr      "  init_module" (show (routinesInitModule x))
+    <> mconcat (zipWith ppR  [1..] (V.toList (routinesReserved x)))
+   where ppR :: Int -> w -> String
+         ppR i r = mkAttr ("    reserved" ++ show i) (show r)
 
 ------------------------------------------------------------------------
 -- UUID
@@ -1152,33 +1176,43 @@ data LC_COMMAND
       -- The fields contain the command type code and the contents of the buffer.
     deriving (Show, Eq)
 
-ppSegment :: (Integral w, Show w) => String -> Int -> MachoSegment w -> String
-ppSegment cmd w s
-  =  mkAttr "      cmd" cmd
-  <> mkAttr "  segname" (show (seg_segname s))
-  <> mkAttr "   vmaddr" (showPadHex w (seg_vmaddr s))
-  <> mkAttr "   vmsize" (showPadHex w (seg_vmsize s))
-  <> mkAttr "  fileoff" (show (seg_fileoff s))
-  <> mkAttr " filesize" (show (seg_filesize s))
-  <> mkAttr "  maxprot" (show (seg_maxprot s))
-  <> mkAttr " initprot" (show (seg_initprot s))
-  <> mkAttr "   nsects" (show (length (seg_sections s)))
-  <> mkAttr "    flags" (show (seg_flags s))
-  <> mconcat (ppSection w <$> seg_sections s)
+instance (Integral w, Show w, FiniteBits w) => PPFields (MachoSegment w) where
+
+  ppFields cmd s
+    =  mkAttr "      cmd" cmd
+    <> mkAttr "  segname" (show (seg_segname s))
+    <> mkAttr "   vmaddr" (showPadHex (seg_vmaddr s))
+    <> mkAttr "   vmsize" (showPadHex (seg_vmsize s))
+    <> mkAttr "  fileoff" (show (seg_fileoff s))
+    <> mkAttr " filesize" (show (seg_filesize s))
+    <> mkAttr "  maxprot" (show (seg_maxprot s))
+    <> mkAttr " initprot" (show (seg_initprot s))
+    <> mkAttr "   nsects" (show (length (seg_sections s)))
+    <> mkAttr "    flags" (show (seg_flags s))
+    <> mconcat (ppSection <$> seg_sections s)
 
 -- | Pretty print load commands in a style similiar to otool.
 ppLoadCommand :: LC_COMMAND -> String
-ppLoadCommand (LC_SEGMENT s)        = ppSegment "LC_SEGMENT" 8 s
+ppLoadCommand (LC_SEGMENT s)        = ppFields "LC_SEGMENT" s
 ppLoadCommand (LC_SYMTAB x)         = ppFields "LC_SYMTAB" x
 
 ppLoadCommand (LC_DYSYMTAB s)       = ppFields "LC_DYSYMTAB" s
 
-ppLoadCommand (LC_LOAD_DYLINKER x)  = ppFields "LC_LOAD_DYLINKER" x
-ppLoadCommand (LC_ID_DYLINKER x)    = ppFields "LC_ID_DYLINKER" x
+ppLoadCommand (LC_LOAD_DYLINKER x)
+  =  mkAttr "          cmd" "LC_LOAD_DYLINKER"
+  <> mkAttr "         name" (show x)
+ppLoadCommand (LC_ID_DYLINKER x)
+  =  mkAttr "          cmd" "LC_ID_DYLINKER"
+  <> mkAttr "         name" (show x)
 
-ppLoadCommand (LC_SEGMENT_64 s)     = ppSegment "LC_SEGMENT_64" 16 s
+ppLoadCommand (LC_ROUTINES x) = ppFields "LC_ROUTINES" x
 
-ppLoadCommand (LC_UUID x)           = ppFields "LC_UUID" x
+ppLoadCommand (LC_SEGMENT_64 x)  = ppFields  "LC_SEGMENT_64" x
+ppLoadCommand (LC_ROUTINES_64 x) = ppFields "LC_ROUTINES_64" x
+ppLoadCommand (LC_UUID x) = ppFields "LC_UUID" x
+ppLoadCommand (LC_RPATH x)
+  =  mkAttr "          cmd" "LC_RPATH"
+  <> mkAttr "         path" (show x)
 
 ppLoadCommand (LC_DYLD_INFO d)      = ppFields "LC_DYLD_INFO" d
 ppLoadCommand (LC_DYLD_INFO_ONLY d) = ppFields "LC_DYLD_INFO_ONLY" d
