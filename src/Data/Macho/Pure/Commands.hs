@@ -1,13 +1,13 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{- LANGUAGE MultiParamTypeClasses -}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Data.MachoPure.Commands
+module Data.Macho.Pure.Commands
   ( -- * Commands
     LC_COMMAND(..)
-  , ppLoadCommand
+  , ppLoadCommands
+  , parseCommands
   , FileOffset(..)
   , UUID
   , LCStr(..)
@@ -20,16 +20,16 @@ module Data.MachoPure.Commands
   , preboundIsBound
   , ThreadCommand(..)
   , EncryptionInfoCommand(..)
-  , getEncryptionInfoCommand
   , DyldInfoCommand(..)
   , VersionMinCommand(..)
   , EntryPointCommand(..)
   , SourceVersionCommand(..)
+  , RoutinesCommand(..)
+  , Timestamp(..)
+  , Version(..)
     -- * Segments
   , MachoSegment(..)
   , Addr(..)
-  , SegmentName
-  , getSegmentName
     -- ** Segment flags
   , SG_FLAGS(..)
   , pattern SG_HIGHVM
@@ -40,45 +40,10 @@ module Data.MachoPure.Commands
   , pattern VM_PROT_WRITE
   , pattern VM_PROT_EXECUTE
     -- * Sections
-  , MachoSection(..)
-  , secType
+  , module Data.Macho.Pure.Commands.Section
   , Align(..)
-  , SectionName
-  , getSectionName
-    -- ** SectionType
-  , SectionType(..)
-  , pattern S_REGULAR
-  , pattern S_ZEROFILL
-  , pattern S_CSTRING_LITERALS
-  , pattern S_4BYTE_LITERALS
-  , pattern S_8BYTE_LITERALS
-  , pattern S_LITERAL_POINTERS
-  , pattern S_NON_LAZY_SYMBOL_POINTERS
-  , pattern S_LAZY_SYMBOL_POINTERS
-  , pattern S_SYMBOL_STUBS
-  , pattern S_MOD_INIT_FUNC_POINTERS
-  , pattern S_MOD_TERM_FUNC_POINTERS
-  , pattern S_COALESCED
-  , pattern S_GB_ZEROFILL
-  , pattern S_INTERPOSING
-  , pattern S_16BYTE_LITERALS
-  , pattern S_DTRACE_DOF
-  , pattern S_LAZY_DYLIB_SYMBOL_POINTERS
-    -- ** Section flags
-  , S_ATTR(..)
-  , pattern S_ATTR_PURE_INSTRUCTIONS
-  , pattern S_ATTR_NO_TOC
-  , pattern S_ATTR_STRIP_STATIC_SYMS
-  , pattern S_ATTR_NO_DEAD_STRIP
-  , pattern S_ATTR_LIVE_SUPPORT
-  , pattern S_ATTR_SELF_MODIFYING_CODE
-  , pattern S_ATTR_DEBUG
-  , pattern S_ATTR_SOME_INSTRUCTIONS
-  , pattern S_ATTR_EXT_RELOC
-  , pattern S_ATTR_LOC_RELOC
     -- * Dynamic symbol table
   , DysymtabCommand(..)
-  , DylibModule(..)
     -- * LINKEDIT information
   , LinkeditDataCommand(..)
     -- * Linker options
@@ -98,9 +63,13 @@ module Data.MachoPure.Commands
   , pattern TOOL_CLANG
   , pattern TOOL_SWIFT
   , pattern TOOL_LD
-    -- * Support
-  , CommandType(..)
   ) where
+
+import           Data.Macho.Pure.Commands.Dysymtab
+import           Data.Macho.Pure.Commands.Section
+import           Data.Macho.Pure.Decoder
+import           Data.Macho.Pure.Header (MH_MAGIC)
+import           Data.Macho.Pure.Internal
 
 import           Control.Monad
 import           Data.Binary.Get hiding (Decoder)
@@ -109,20 +78,15 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.UTF8 as UTF8
+import           Data.Map (Map)
+import qualified Data.Map.Strict as Map
 import           Data.Monoid
-import           Data.String
+-- Import UTCTime show instance from Format
 import           Data.Time.Format ()
 import           Data.Time.Clock.POSIX
 import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
-
-import           Data.MachoPure.Decoder
-
-showPadHex :: (FiniteBits a, Integral a, Show a) => a -> String
-showPadHex a = "0x" ++ replicate (c - length s) '0' ++ s
-  where c = finiteBitSize a
-        s = showHex a ""
 
 newtype Attrs = Attrs [(String, String)]
 
@@ -158,19 +122,6 @@ instance Show Addr where
   show (Addr a) = showPadHex a
 
 ------------------------------------------------------------------------
--- FileOffset
-
-newtype FileOffset = FileOffset { fileOffsetValue :: Word32 }
-  deriving (Eq)
-
-instance Show FileOffset where
-  show = show . fileOffsetValue
-
-instance CommandType FileOffset where
-  getValue _ = FileOffset <$> getWord32
-
-
-------------------------------------------------------------------------
 -- CommandType
 
 -- | A class for values that can be decoded from a command.
@@ -183,6 +134,9 @@ instance CommandType Word32 where
 
 instance CommandType Word64 where
   getValue _ = getWord64
+
+instance CommandType FileOffset where
+  getValue _ = FileOffset <$> getWord32
 
 ------------------------------------------------------------------------
 -- MachoRecord
@@ -199,203 +153,7 @@ instance (CommandType a, MachoRecord b c) => MachoRecord (a -> b) c where
   getRecord f lc = getValue lc >>= \v -> getRecord (f v) lc
 
 ------------------------------------------------------------------------
--- SegmentName
-
--- | A 16-character segment name.
-newtype SegmentName = SegmentName B.ByteString
-  deriving (Eq, Ord)
-
-getSegmentName :: Get SegmentName
-getSegmentName = SegmentName <$> getByteString 16
-
-instance IsString SegmentName where
-  fromString s
-      | B.length b > 16 = error "Segment names are at most 16 bytes."
-      | otherwise = SegmentName (b <> B.replicate (16 - B.length b) 0)
-    where b = C.pack s
-
-instance Show SegmentName where
-  show (SegmentName b) = C.unpack b
-
-------------------------------------------------------------------------
--- SectionName
-
-newtype SectionName = SectionName B.ByteString
-  deriving (Eq, Ord)
-
-getSectionName :: Get SectionName
-getSectionName = SectionName <$> getByteString 16
-
-instance IsString SectionName where
-  fromString s
-      | B.length b > 16 = error "Section names are at most 16 bytes."
-      | otherwise = SectionName (b <> B.replicate (16 - B.length b) 0)
-    where b = C.pack s
-
-instance Show SectionName where
-  show (SectionName b) = C.unpack b
-
-------------------------------------------------------------------------
--- SectionType
-
--- | A section type
-newtype SectionType = SectionType Word8
-  deriving (Eq,Show)
-
-pattern S_REGULAR :: SectionType
-pattern S_REGULAR = SectionType 0x00
--- ^ regular section
-
-pattern S_ZEROFILL :: SectionType
-pattern S_ZEROFILL = SectionType 0x01
--- ^ zero fill on demand section
-
-pattern S_CSTRING_LITERALS :: SectionType
-pattern S_CSTRING_LITERALS = SectionType 0x02
--- ^ section with only literal C strings
-
-pattern S_4BYTE_LITERALS :: SectionType
-pattern S_4BYTE_LITERALS = SectionType 0x03
--- ^ section with only 4 byte literals
-
-pattern S_8BYTE_LITERALS :: SectionType
-pattern S_8BYTE_LITERALS = SectionType 0x04
--- ^ section with only 8 byte literals
-
-pattern S_LITERAL_POINTERS :: SectionType
-pattern S_LITERAL_POINTERS = SectionType 0x05
--- ^ section with only pointers to literals
-
-pattern S_NON_LAZY_SYMBOL_POINTERS :: SectionType
-pattern S_NON_LAZY_SYMBOL_POINTERS = SectionType 0x06
--- ^ section with only non-lazy symbol pointers
-
-pattern S_LAZY_SYMBOL_POINTERS :: SectionType
-pattern S_LAZY_SYMBOL_POINTERS = SectionType 0x07
--- ^ section with only lazy symbol pointers
-
-pattern S_SYMBOL_STUBS :: SectionType
-pattern S_SYMBOL_STUBS = SectionType 0x08
--- ^ section with only symbol stubs, bte size of stub in the reserved2 field
-
-pattern S_MOD_INIT_FUNC_POINTERS :: SectionType
-pattern S_MOD_INIT_FUNC_POINTERS = SectionType 0x09
--- ^ section with only function pointers for initialization
-
-pattern S_MOD_TERM_FUNC_POINTERS :: SectionType
-pattern S_MOD_TERM_FUNC_POINTERS = SectionType 0x0a
--- ^ section with only function pointers for termination
-
-pattern S_COALESCED :: SectionType
-pattern S_COALESCED = SectionType 0x0b
--- ^ section contains symbols that are to be coalesced
-
-pattern S_GB_ZEROFILL :: SectionType
-pattern S_GB_ZEROFILL = SectionType 0x0c
--- ^ zero fill on demand section (that can be larger than 4 gigabytes)
-
-pattern S_INTERPOSING :: SectionType
-pattern S_INTERPOSING = SectionType 0x0d
--- ^ section with only pairs of function pointers for interposing
-
-pattern S_16BYTE_LITERALS :: SectionType
-pattern S_16BYTE_LITERALS = SectionType 0x0e
--- ^ section with only 16 byte literals
-
-pattern S_DTRACE_DOF :: SectionType
-pattern S_DTRACE_DOF = SectionType 0x0f
--- ^ section contains DTrace Object Format
-
-pattern S_LAZY_DYLIB_SYMBOL_POINTERS :: SectionType
-pattern S_LAZY_DYLIB_SYMBOL_POINTERS = SectionType 0x10
--- ^ section with only lazy symbol pointers to lazy loaded dylibs
-
-------------------------------------------------------------------------
--- S_ATTR
-
--- | Section attributes (this contains the full 32-bit flags, and
--- the low 8-bits are for the type.
-newtype S_ATTR = S_ATTR { secAttrValue :: Word32 }
-  deriving (Eq, Bits, Num)
-
--- | Return the type bits from the attribute.
-secAttrType :: S_ATTR -> SectionType
-secAttrType = SectionType . fromIntegral . secAttrValue
-
-instance Show S_ATTR where
-  show (S_ATTR x) = showPadHex x
-
-pattern S_ATTR_PURE_INSTRUCTIONS :: S_ATTR
-pattern S_ATTR_PURE_INSTRUCTIONS = S_ATTR 0x80000000
--- ^ section contains only true machine instructions
-
-pattern S_ATTR_NO_TOC :: S_ATTR
-pattern S_ATTR_NO_TOC = S_ATTR 0x40000000
--- ^ setion contains coalesced symbols that are not to be in a ranlib table of contents
-
-pattern S_ATTR_STRIP_STATIC_SYMS :: S_ATTR
-pattern S_ATTR_STRIP_STATIC_SYMS = S_ATTR 0x20000000
--- ^ ok to strip static symbols in this section in files with the MH_DYLDLINK flag
-
-pattern S_ATTR_NO_DEAD_STRIP :: S_ATTR
-pattern S_ATTR_NO_DEAD_STRIP = S_ATTR 0x10000000
--- ^ no dead stripping
-
-pattern S_ATTR_LIVE_SUPPORT :: S_ATTR
-pattern S_ATTR_LIVE_SUPPORT = S_ATTR  0x08000000
--- ^ blocks are live if they reference live blocks
-
-pattern S_ATTR_SELF_MODIFYING_CODE :: S_ATTR
-pattern S_ATTR_SELF_MODIFYING_CODE = S_ATTR 0x04000000
--- ^ used with i386 code stubs written on by dyld
-
-pattern S_ATTR_DEBUG :: S_ATTR
-pattern S_ATTR_DEBUG = S_ATTR 0x02000000
--- ^ a debug section
-
-pattern S_ATTR_SOME_INSTRUCTIONS :: S_ATTR
-pattern S_ATTR_SOME_INSTRUCTIONS = S_ATTR 0x00000400
--- ^ section contains soem machine instructions
-
-pattern S_ATTR_EXT_RELOC :: S_ATTR
-pattern S_ATTR_EXT_RELOC = S_ATTR 0x00000200
--- ^ section has external relocation entries
-
-pattern S_ATTR_LOC_RELOC :: S_ATTR
-pattern S_ATTR_LOC_RELOC = S_ATTR 0x00000100
--- ^ section has local relocation entries
-
-------------------------------------------------------------------------
 -- MachoSection
-
--- | An alignment field
-newtype Align = Align Word32
-  deriving (Eq)
-
-instance Show Align where
-  show (Align w) = "2^" ++ show w ++ "(" ++ show (2^w :: Integer) ++ ")"
-
--- | Section and Section_64 entries
-data MachoSection w = MachoSection
-    { secSectname :: !SectionName
-      -- ^ name of section
-    , secSegname  :: !SegmentName -- ^ name of segment that should own this section
-    , secAddr     :: !w           -- ^ virtual memoy address for section
-    , secSize     :: !w           -- ^ size of section
-
-    , secOffset   :: !Word32
-    , secAlign    :: !Align
-      -- ^ alignment required by section
-    , secReloff    :: !FileOffset -- ^ Offset to relocations for section
-    , secNReloc    :: !Word32     -- ^ Number of relocations for section
-    , secFlags     :: !S_ATTR        -- ^ attributes of section
-    , secReserved1 :: !Word32 -- ^ First reserved value
-    , secReserved2 :: !w      -- ^ Second reserved value
-    } deriving (Show, Eq)
-
--- | Return the type of the section
-secType :: MachoSection w -> SectionType
-secType = secAttrType . secFlags
 
 ppSection :: (FiniteBits w, Integral w, Show w) => MachoSection w -> String
 ppSection s
@@ -521,21 +279,6 @@ instance CommandType w => CommandType (MachoSegment w) where
 
 
 ------------------------------------------------------------------------
--- DylibModule
-
-data DylibModule = DylibModule
-    { dylib_module_name_offset    :: Word32           -- ^ module name string table offset
-    , dylib_ext_def_sym           :: (Word32, Word32) -- ^ (initial, count) pair of symbol table indices for externally defined symbols
-    , dylib_ref_sym               :: (Word32, Word32) -- ^ (initial, count) pair of symbol table indices for referenced symbols
-    , dylib_local_sym             :: (Word32, Word32) -- ^ (initial, count) pair of symbol table indices for local symbols
-    , dylib_ext_rel               :: (Word32, Word32) -- ^ (initial, count) pair of symbol table indices for externally referenced symbols
-    , dylib_init                  :: (Word32, Word32) -- ^ (initial, count) pair of symbol table indices for the index of the module init section and the number of init pointers
-    , dylib_term                  :: (Word32, Word32) -- ^ (initial, count) pair of symbol table indices for the index of the module term section and the number of term pointers
-    , dylib_objc_module_info_addr :: Word64           -- ^ statically linked address of the start of the data for this module in the __module_info section in the __OBJC segment
-    , dylib_objc_module_info_size :: Word32           -- ^ number of bytes of data for this module that are used in the __module_info section in the __OBJC segment
-    } deriving (Show, Eq)
-
-------------------------------------------------------------------------
 -- SymTabCommand
 
 -- | Information from a symbol table command
@@ -603,7 +346,7 @@ instance CommandType ThreadCommand where
     flavor <- getWord32
     count <- getWord32
     when (count >= 2^(30::Int)) $ do
-      fail $ "Thread command count is to large " ++ show count
+      fail $ "Thread command count is too large " ++ show count
     threadState <- lift $ getByteString (4 * fromIntegral count)
     pure ThreadCommand { threadFlavor = flavor
                        , threadData = threadState
@@ -640,28 +383,6 @@ instance CommandType FVMFileCommand where
 ------------------------------------------------------------------------
 -- DysymtabCommand
 
--- | Dynamic symbol table command
-data DysymtabCommand = DysymtabCommand
-    { dysymtabILocalSym  :: !Word32 -- ^ Index to local symbols
-    , dysymtabNLocalSym  :: !Word32 -- ^ Number of local symbols
-    , dysymtabIExtdefSym :: !Word32 -- ^ Index to externally defined symbols
-    , dysymtabNExtdefSym :: !Word32 -- ^ Number of externally defined symbols
-    , dysymtabIUndefSym  :: !Word32 -- ^ Index to undefined symbols
-    , dysymtabNUndefSym  :: !Word32 -- ^ Number of undefined symbols
-    , dysymtabTocOff         :: !FileOffset        -- ^ Offset for symbol table of contents
-    , dysymtabTocCount       :: !Word32            -- ^ Number of symbols in contents.
-    , dysymtabModtabOff      :: !FileOffset        -- ^ Offset for modules
-    , dysymtabModtabCount    :: !Word32            -- ^ Number of modules.
-    , dysymtabExtrefSymOff   :: !FileOffset        -- ^ Offset of external symbol reference indices
-    , dysymtabExtrefSymCount :: !Word32            -- ^ Number of external reference symbol indices
-    , dysymtabIndirectSymOff   :: !FileOffset   -- ^ Offset of indirect symbol indices
-    , dysymtabIndirectSymCount :: !Word32       -- ^ Number of indirect symbol indices
-    , dysymtabExtRelOff     :: !FileOffset   -- ^ External relocation table offset
-    , dysymtabExtRelCount   :: !Word32       -- ^ External relocation count
-    , dysymtabLocalRelOff   :: !FileOffset   -- ^ Local relocation table offset
-    , dysymtabLocalRelCount :: !Word32       -- ^ Local relocation count
-    } deriving (Show, Eq)
-
 instance CommandType DysymtabCommand where
   getValue = getRecord DysymtabCommand
 
@@ -691,6 +412,8 @@ instance PPFields DysymtabCommand where
 ------------------------------------------------------------------------
 -- Timestamp
 
+-- | A timestamp in Macho uses the posix convention of representing
+-- time as the number of seconds since 1970-01-01 00:00 UTC
 newtype Timestamp = Timestamp Word32
   deriving (Eq)
 
@@ -826,6 +549,7 @@ data EncryptionInfoCommand
   }
   deriving (Eq, Show)
 
+-- | Decode an encryption info command with a given amount of padding.
 getEncryptionInfoCommand :: Int -> Decoder EncryptionInfoCommand
 getEncryptionInfoCommand paddingCount = do
   off  <- getWord32
@@ -876,6 +600,8 @@ instance PPFields DyldInfoCommand where
 ------------------------------------------------------------------------
 -- Version
 
+-- | A verission is a 32-bit word that encodes a major version and option
+-- minor and trivial versions.
 newtype Version = Version Word32
   deriving (Eq)
 
@@ -1220,3 +946,107 @@ ppLoadCommand (LC_DYLD_INFO_ONLY d) = ppFields "LC_DYLD_INFO_ONLY" d
 ppLoadCommand (LC_SOURCE_VERSION x) = ppFields "LC_SOURCE_VERSION" x
 
 ppLoadCommand c = mkAttr "UNKNOWN" (show c)
+
+-- | Pretty print the list of commands using otool format.
+ppLoadCommands :: [LC_COMMAND] -> String
+ppLoadCommands cmds = concat (zipWith pp [0..] cmds)
+  where pp :: Integer -> LC_COMMAND -> String
+        pp i c = "Load command " ++ show i ++ "\n" ++ ppLoadCommand c
+
+------------------------------------------------------------------------
+-- Load commands
+
+-- | A command getter starts with the command contents, but also has it passed in as a bytestring.
+type CommandGetter =
+      B.ByteString
+       -> Decoder LC_COMMAND
+
+-- | Map from command type code to the parser for that command.
+loadCommandMap :: Map Word32 CommandGetter
+loadCommandMap = Map.fromList
+  [ (,) 0x00000001 $ fmap LC_SEGMENT    . getValue
+  , (,) 0x00000002 $ fmap LC_SYMTAB     . getValue
+  , (,) 0x00000003 $ fmap LC_SYMSEG     . getValue
+  , (,) 0x00000004 $ fmap LC_THREAD     . getValue
+  , (,) 0x00000005 $ fmap LC_UNIXTHREAD . getValue
+  , (,) 0x00000006 $ fmap LC_LOADFVMLIB . getValue
+  , (,) 0x00000007 $ fmap LC_IDFVMLIB   . getValue
+  , (,) 0x00000008 $ pure . LC_IDENT
+  , (,) 0x00000009 $ fmap LC_FVMFILE . getValue
+  , (,) 0x0000000a $ pure . LC_PREPAGE
+  , (,) 0x0000000b $ fmap LC_DYSYMTAB . getValue
+  , (,) 0x0000000c $ fmap LC_LOAD_DYLIB     . getValue
+  , (,) 0x0000000d $ fmap LC_ID_DYLIB       . getValue
+  , (,) 0x0000000e $ fmap LC_LOAD_DYLINKER  . getValue
+  , (,) 0x0000000f $ fmap LC_ID_DYLINKER    . getValue
+  , (,) 0x00000010 $ fmap LC_PREBOUND_DYLIB . getValue
+  , (,) 0x00000011 $ fmap LC_ROUTINES . getValue
+  , (,) 0x00000012 $ fmap LC_SUB_FRAMEWORK . getValue
+  , (,) 0x00000013 $ fmap LC_SUB_UMBRELLA  . getValue
+  , (,) 0x00000014 $ fmap LC_SUB_CLIENT    . getValue
+  , (,) 0x00000015 $ fmap LC_SUB_LIBRARY   . getValue
+  , (,) 0x00000016 $ \_  -> LC_TWOLEVEL_HINTS <$> (FileOffset <$> getWord32) <*> getWord32
+  , (,) 0x00000017 $ fmap LC_PREBIND_CKSUM . getValue
+  , (,) 0x80000018 $ fmap LC_LOAD_WEAK_DYLIB . getValue
+  , (,) 0x00000019 $ fmap LC_SEGMENT_64  . getValue
+  , (,) 0x0000001a $ fmap LC_ROUTINES_64 . getValue
+  , (,) 0x0000001b $ fmap LC_UUID  . getValue
+  , (,) 0x8000001c $ fmap LC_RPATH . getValue
+  , (,) 0x0000001d $ fmap LC_CODE_SIGNATURE . getValue
+  , (,) 0x0000001e $ fmap LC_SEGMENT_SPLIT_INFO . getValue
+  , (,) 0x8000001f $ fmap LC_REEXPORT_DYLIB . getValue
+  , (,) 0x00000020 $ fmap LC_LAZY_LOAD_DYLIB . getValue
+  , (,) 0x00000021 $ \_  -> LC_ENCRYPTION_INFO <$> getEncryptionInfoCommand 0
+  , (,) 0x00000022 $ fmap LC_DYLD_INFO      . getValue
+  , (,) 0x80000022 $ fmap LC_DYLD_INFO_ONLY . getValue
+  , (,) 0x80000023 $ fmap LC_LOAD_UPWARD_DYLIB . getValue
+  , (,) 0x00000024 $ fmap LC_VERSION_MIN_MACOSX   . getValue
+  , (,) 0x00000025 $ fmap LC_VERSION_MIN_IPHONEOS . getValue
+  , (,) 0x00000026 $ fmap LC_FUNCTION_STARTS . getValue
+  , (,) 0x00000027 $ fmap LC_DYLD_ENVIRONMENT . getValue
+  , (,) 0x80000028 $ fmap LC_MAIN . getValue
+  , (,) 0x00000029 $ fmap LC_DATA_IN_CODE . getValue
+  , (,) 0x0000002a $ fmap LC_SOURCE_VERSION . getValue
+  , (,) 0x0000002b $ fmap LC_DYLIB_CODE_SIGN_DRS . getValue
+  , (,) 0x0000002c $ \_  -> LC_ENCRYPTION_INFO_64 <$> getEncryptionInfoCommand 4
+  , (,) 0x0000002d $ fmap LC_LINKER_OPTION . getValue
+  , (,) 0x0000002e $ fmap LC_LINKER_OPTIMIZATION_HINT . getValue
+  , (,) 0x0000002f $ fmap LC_VERSION_MIN_TVOS . getValue
+  , (,) 0x00000030 $ fmap LC_VERSION_MIN_WATCHOS . getValue
+  , (,) 0x00000031 $ pure . LC_NOTE
+  , (,) 0x00000032 $ fmap LC_BUILD_VERSION . getValue
+  ]
+
+getLoadCommand :: Decoder LC_COMMAND
+getLoadCommand = do
+  magic <- binary
+  let end = magicEndianness magic
+
+  -- Peek to find code and cmd
+  (code,cmdsize) <- lift $
+    lookAhead $ (,) <$> (_getWord32 end) <*> (_getWord32 end)
+  when (cmdsize < 8) $ do
+    fail "Invalid command size"
+  -- Get full contents
+  contents <- lift $ getByteString (fromIntegral cmdsize)
+  pure $!
+    case Map.lookup code loadCommandMap of
+      Nothing ->
+        LC_UNKNOWN code contents
+      Just getter -> do
+        case doDecode magic (B.drop 8 contents) (getter contents) of
+          Right (_,_,r) -> r
+          Left (_,pos,msg) -> LC_INVALID code contents pos msg
+
+getLoadCommands :: Word32 -> Decoder [LC_COMMAND]
+getLoadCommands ncmds = replicateM (fromIntegral ncmds) $ getLoadCommand
+
+-- | Parse the buffer as a list of commands.
+parseCommands :: MH_MAGIC
+              -> Word32
+              -> B.ByteString
+              -> Either (ByteOffset, String) [LC_COMMAND]
+parseCommands magic ncmds loadCommandBuffer =
+  case doDecode magic loadCommandBuffer (getLoadCommands ncmds) of
+    Left (_,pos,msg) -> Left (pos, msg)
+    Right (_,_,commands) -> Right commands

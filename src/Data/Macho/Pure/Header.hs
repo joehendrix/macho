@@ -1,11 +1,14 @@
+{-|
+Declares datatype for representing Macho header and fields.
+-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE PatternSynonyms #-}
-module Data.MachoPure.Header
+module Data.Macho.Pure.Header
   ( -- * Header
     MachoHeader(..)
     -- ** Magic
   , MH_MAGIC
-  , mkMagic
+  , magicFromWord32LE
   , magicIs64Bit
   , magicIsLittleEndian
   , magicWordSize
@@ -21,6 +24,7 @@ module Data.MachoPure.Header
   , pattern CPU_TYPE_ARM
   , pattern CPU_TYPE_POWERPC
   , pattern CPU_TYPE_POWERPC64
+  , CPUSpecific(..)
     -- ** CPU subtype
   , CPU_SUBTYPE(..)
     -- *** Intel subtypes
@@ -112,31 +116,48 @@ import           Numeric (showHex)
 newtype MH_MAGIC = MH_MAGIC { magicValue :: Word32 }
   deriving (Eq, Ord)
 
+-- | 32-bit little endian magic value.
 pattern MH_MAGIC32 :: MH_MAGIC
 pattern MH_MAGIC32 = MH_MAGIC 0xfeedface
 
+-- | 32-bit big endian magic value.
 pattern MH_CIGAM32 :: MH_MAGIC
 pattern MH_CIGAM32 = MH_MAGIC 0xcefaedfe
 
+-- | 64-bit little endian magic value.
 pattern MH_MAGIC64 :: MH_MAGIC
 pattern MH_MAGIC64 = MH_MAGIC 0xfeedfacf
 
+-- | 64-bit big endian magic value.
 pattern MH_CIGAM64 :: MH_MAGIC
 pattern MH_CIGAM64 = MH_MAGIC 0xcffaedfe
+
+{-# COMPLETE MH_MAGIC32, MH_CIGAM32, MH_MAGIC64, MH_CIGAM64 :: MH_MAGIC #-}
 
 -- | Check magic uses little endian byte order.
 magicIsLittleEndian :: MH_MAGIC -> Bool
 magicIsLittleEndian (MH_MAGIC v) = (v .&. 0xfeedface) == 0xfeedface
 
 -- | Check magic is 64-bit
---
--- This test is to check whether either the least or most-signifcant byte is odd.
 magicIs64Bit :: MH_MAGIC -> Bool
+-- Because there are only four possible values, we can
+-- just check that either the least or most significant
+-- bit is odd.
 magicIs64Bit (MH_MAGIC v) = v .&. 0x01000001 /= 0
 
 -- | The word size for the given magic
 magicWordSize :: MH_MAGIC -> Word32
 magicWordSize m = if magicIs64Bit m then 8 else 4
+
+-- | Create magic from Word32 read in little-bit endian order or return
+-- `Nothing` if it is not a valid magic value.
+magicFromWord32LE :: Word32 -> Maybe MH_MAGIC
+magicFromWord32LE w
+    -- We just check if the value feedface in forwards or reverse after
+    -- masking off the 64-bit flag.
+  | (w .&. 0xfffffffe) == 0xfeedface || (w .&. 0xfeffffff) == 0xcefaedfe =
+    Just (MH_MAGIC w)
+  | otherwise = Nothing
 
 knownMagic :: Map MH_MAGIC String
 knownMagic = Map.fromList
@@ -145,12 +166,6 @@ knownMagic = Map.fromList
   , (,) MH_CIGAM32 "MH_CIGAM32"
   , (,) MH_CIGAM64 "MH_CIGAM64"
   ]
-
--- | Create magic from Word32 read in little-bit endian order.
-mkMagic :: Word32 -> Maybe MH_MAGIC
-mkMagic w
-  | Map.member (MH_MAGIC w) knownMagic = Just (MH_MAGIC w)
-  | otherwise = Nothing
 
 instance Show MH_MAGIC where
   show m =
@@ -198,6 +213,11 @@ instance Show CPU_TYPE where
       case Map.lookup c cputype of
         Just nm -> nm
         Nothing -> "0x" ++ showHex (cpuTypeValue c) ""
+
+-- | A typeclass for printing values whose interpretation depends on the @CPU_TYPE@.
+class CPUSpecific tp where
+  ppCPUSpecific :: CPU_TYPE -> tp -> String
+
 
 ------------------------------------------------------------------------
 -- CPU_SUBTYPE
@@ -516,8 +536,10 @@ pattern MH_NO_HEAP_EXECUTION = MH_FLAGS 0x1000000
 ------------------------------------------------------------------------
 -- MachoHeader
 
+-- | Information stored in the header of a file.
 data MachoHeader = MachoHeader
     { mh_magic      :: !MH_MAGIC
+      -- ^ Magic identifier used to identify file and indicate bitwidth/endianness.
     , mh_cputype    :: !CPU_TYPE    -- ^ CPU family the Mach-O executes on.
     , mh_cpusubtype :: !CPU_SUBTYPE -- ^ Specific CPU type the Mach-O executes on.
     , mh_filetype   :: !MH_FILETYPE -- ^ Type of Mach-o file.

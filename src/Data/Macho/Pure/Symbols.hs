@@ -1,8 +1,9 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE PatternSynonyms #-}
-module Data.MachoPure.Symbols
+module Data.Macho.Pure.Symbols
   ( -- * Symbols
     MachoSymbol(..)
+  , getSymTabEntries
     -- * Symbol type information
   , SymbolType(..)
   , pattern N_STAB
@@ -67,6 +68,11 @@ import           Data.Bits
 import qualified Data.ByteString as B
 import           Data.Word
 import           Numeric (showHex)
+
+import qualified Data.Vector as V
+import           Data.Macho.Pure.Header (MH_MAGIC, magicWordSize)
+import           Data.Macho.Pure.Commands (SymTabCommand(..))
+import           Data.Macho.Pure.Decoder
 
 ------------------------------------------------------------------------
 -- N_TYPE
@@ -255,7 +261,7 @@ newtype REFERENCE_FLAG = REFERENCE_FLAG Word16
   deriving (Eq, Bits)
 
 instance Show REFERENCE_FLAG where
-  show (REFERENCE_FLAG w) = "REFERNCE_FLAG " ++ showHex w ""
+  showsPrec p (REFERENCE_FLAG w) = showParen (p >= 10) $ showString "REFERENCE_FLAG " . showHex w
 
 -- | The low 4-order bits used to define the reference type.
 referenceType :: REFERENCE_FLAG -> REFERENCE_TYPE
@@ -291,3 +297,44 @@ data MachoSymbol = MachoSymbol
     , sym_flags :: Either Word16 REFERENCE_FLAG -- ^ for stab entries, Left Word16 is the uninterpreted flags field, otherwise Right REFERENCE_FLAG describes the symbol flags.
     , sym_value :: Word64                         -- ^ symbol value, 32-bit symbol values are promoted to 64-bit for simpliciy
     } deriving (Show, Eq)
+
+-- | Returns the symbol table entry size
+symtabEntrySize :: MH_MAGIC -> Word32
+symtabEntrySize magic = 8 + magicWordSize magic
+
+-- | Parse a null-terminated string from an offset in the symbol
+getSymbolName :: B.ByteString -> Decoder B.ByteString
+getSymbolName strsect = do
+  offset <- getWord32
+  pure $!
+    if offset == 0 then
+      B.empty
+     else
+      B.takeWhile (/= 0) (B.drop (fromIntegral offset) strsect)
+
+getNList :: B.ByteString -> Decoder MachoSymbol
+getNList strsect = do
+  n_name  <- getSymbolName strsect
+  typeCode  <- SymbolType <$> getWord8
+  n_sect  <- getWord8
+  n_desc  <- getWord16
+  let ref_flags = if typeCode .&. N_STAB /= 0 then
+                      Left n_desc
+                  else
+                      Right $ REFERENCE_FLAG n_desc
+  n_value <- getWord
+  return $ MachoSymbol { sym_name = n_name
+                       , sym_type = typeCode
+                       , sym_sect = n_sect
+                       , sym_flags = ref_flags
+                       , sym_value = n_value
+                       }
+
+
+-- | This attempts to parse the symbol table entries from the command info
+getSymTabEntries :: MachoFile -> SymTabCommand -> Maybe (V.Vector MachoSymbol)
+getSymTabEntries mfile cmd = do
+  strsect <- subbuffer (machoContents mfile) (symTabStrOffset cmd) (symTabStrSize cmd)
+  V.fromList <$>
+    getTable mfile (symTabOffset cmd) (symTabSymCount cmd)
+             (symtabEntrySize (machoMagic mfile)) (getNList strsect)

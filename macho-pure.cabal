@@ -1,6 +1,6 @@
 name:          macho-pure
 version:       0.21
-author:        Erik Charlebois
+author:        Erik Charlebois, Joe Hendrix
 maintainer:    Joe Hendrix <jhendrix@galois.com>
 build-type:    Simple
 license:       BSD3
@@ -14,7 +14,6 @@ library
        base >= 4 && < 5,
        bytestring,
        binary >= 0.6.4.0,
-       bimap,
        containers,
        mtl,
        time,
@@ -22,10 +21,15 @@ library
        vector
   hs-source-dirs:  src
   exposed-modules:
-    Data.MachoPure
-    Data.MachoPure.Commands
-    Data.MachoPure.Decoder
-    Data.MachoPure.Header
-    Data.MachoPure.Relocations
-    Data.MachoPure.Symbols
+    Data.Macho.Pure
+    Data.Macho.Pure.Commands
+    Data.Macho.Pure.Commands.Dysymtab
+    Data.Macho.Pure.Commands.Section
+    Data.Macho.Pure.FAT
+    Data.Macho.Pure.Header
+    Data.Macho.Pure.Relocations
+    Data.Macho.Pure.Symbols
+  other-modules:
+    Data.Macho.Pure.Decoder
+    Data.Macho.Pure.Internal
   ghc-options: -Wall
